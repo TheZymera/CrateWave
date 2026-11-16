@@ -28,7 +28,7 @@ Thumbs.db
 
 # Editors / IDEs
 .vscode/*
-!.vscode/extensions.json
+
 .idea/
 *.suo
 *.ntvs*
