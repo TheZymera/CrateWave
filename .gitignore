@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+dist-ssr/
+
+# Rust / Tauri build artifacts (huge - never commit)
+src-tauri/target/
+
+# Large sidecar binaries (keep folder structure, ignore heavy .exe binaries)
+src-tauri/binaries/*.exe
+src-tauri/binaries/*-apple-darwin
+src-tauri/binaries/*-linux-gnu
+
+# Local cache, audio exports & user dictionaries
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Environment & OS files
+.env
+.env.*
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
