@@ -1,42 +1,285 @@
 @import "tailwindcss";
 
-:root {
-  color-scheme: dark;
+@layer base {
+  * {
+    box-sizing: border-box;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+    font-family: "Barlow Condensed", sans-serif;
+    background-color: #16181c;
+    color: #eae5dc;
+  }
 }
 
-html,
-body,
-#root {
-  height: 100%;
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  background-color: #161922 !important;
-  background-image: radial-gradient(circle at 50% 42%, #242938 0%, #141720 100%) !important;
-  color: #e6e8f0 !important;
-  font-family: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
-  user-select: none;
-  -webkit-font-smoothing: antialiased;
+.font-label-vintage {
+  font-family: "Fraunces", Georgia, serif;
+}
+
+.font-chassis {
+  font-family: "Barlow Condensed", sans-serif;
 }
 
 .font-mono-tech {
-  font-family: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
+  font-family: "JetBrains Mono", monospace;
 }
 
-.horizon-line {
-  background: linear-gradient(
-    90deg,
-    rgba(214, 184, 255, 0.06) 0%,
-    rgba(214, 184, 255, 0.5) 50%,
-    rgba(214, 184, 255, 0.06) 100%
+/* Brushed Gunmetal Chassis with Procedural Micro-Scratches */
+.chassis-metal {
+  background-color: #25282f;
+  background-image:
+    radial-gradient(ellipse at 50% 0%, rgba(255, 245, 225, 0.09) 0%, transparent 65%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.014) 0px,
+      rgba(255, 255, 255, 0.014) 1px,
+      rgba(0, 0, 0, 0.03) 1px,
+      rgba(0, 0, 0, 0.03) 3px
+    ),
+    linear-gradient(180deg, #32363f 0%, #23262d 48%, #191b20 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.7);
+}
+
+/* Fine Metallic Scratches Overlay */
+.metal-scratches {
+  background-image:
+    linear-gradient(112deg, transparent 42%, rgba(255, 255, 255, 0.045) 42.3%, transparent 42.7%),
+    linear-gradient(68deg, transparent 61%, rgba(255, 255, 255, 0.035) 61.2%, transparent 61.5%),
+    linear-gradient(154deg, transparent 28%, rgba(0, 0, 0, 0.18) 28.2%, transparent 28.6%),
+    linear-gradient(24deg, transparent 74%, rgba(255, 255, 255, 0.04) 74.2%, transparent 74.5%);
+}
+
+/* Warm Mahogany / Espresso Studio Rack Wood */
+.chassis-mahogany {
+  background-color: #261714;
+  background-image:
+    radial-gradient(ellipse at 50% 10%, rgba(255, 195, 130, 0.12) 0%, transparent 60%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 180, 120, 0.02) 0px,
+      rgba(255, 180, 120, 0.02) 2px,
+      rgba(10, 4, 3, 0.15) 2px,
+      rgba(10, 4, 3, 0.15) 6px
+    ),
+    linear-gradient(180deg, #38211c 0%, #241411 55%, #160c0a 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 210, 165, 0.18),
+    inset 0 -3px 10px rgba(0, 0, 0, 0.85);
+}
+
+/* Engraved Silkscreen Text */
+.engraved-text {
+  color: #b8b2a6;
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.85),
+    0 -0.5px 0 rgba(255, 255, 255, 0.15);
+  letter-spacing: 0.14em;
+}
+
+/* Recessed LCD / Glass Display */
+.recessed-lcd {
+  background: linear-gradient(180deg, #0d0f12 0%, #15181d 100%);
+  border: 1px solid #111317;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+/* 3D Arturia-Style Backlit Mechanical Switch */
+.hw-key {
+  position: relative;
+  border-radius: 6px;
+  transition: transform 90ms ease, box-shadow 90ms ease, background 150ms ease;
+  background: linear-gradient(180deg, #dcd6c8 0%, #c4bdb0 75%, #9d9689 100%);
+  border: 1px solid #181a1f;
+  box-shadow:
+    0 5px 0 #14161a,
+    0 7px 12px rgba(0, 0, 0, 0.65),
+    inset 0 1px 1px rgba(255, 255, 255, 0.85),
+    inset 0 -2px 3px rgba(0, 0, 0, 0.25);
+  color: #262420;
+}
+
+.hw-key:hover {
+  filter: brightness(1.04);
+}
+
+.hw-key:active,
+.hw-key-pressed {
+  transform: translateY(3px);
+  box-shadow:
+    0 2px 0 #14161a,
+    0 3px 6px rgba(0, 0, 0, 0.7),
+    inset 0 2px 4px rgba(0, 0, 0, 0.35);
+}
+
+/* Warm Tungsten Lit Keycap */
+.hw-key-lit-amber {
+  background: radial-gradient(circle at 50% 45%, #fff5d6 0%, #ffd27d 52%, #e09c3e 100%);
+  color: #2b1804;
+  box-shadow:
+    0 2px 0 #14161a,
+    0 0 18px rgba(255, 188, 78, 0.55),
+    inset 0 1px 2px rgba(255, 255, 255, 0.95),
+    inset 0 -2px 4px rgba(160, 82, 10, 0.45);
+  transform: translateY(3px);
+}
+
+.hw-key-lit-green {
+  background: radial-gradient(circle at 50% 45%, #e6ffea 0%, #86efac 52%, #22c55e 100%);
+  color: #052e16;
+  box-shadow:
+    0 2px 0 #14161a,
+    0 0 18px rgba(74, 222, 128, 0.5),
+    inset 0 1px 2px rgba(255, 255, 255, 0.9);
+  transform: translateY(3px);
+}
+
+.hw-key-lit-red {
+  background: radial-gradient(circle at 50% 45%, #ffe4e6 0%, #fda4af 52%, #e11d48 100%);
+  color: #3b0410;
+  box-shadow:
+    0 2px 0 #14161a,
+    0 0 18px rgba(244, 63, 94, 0.5),
+    inset 0 1px 2px rgba(255, 255, 255, 0.9);
+  transform: translateY(3px);
+}
+
+/* Hyper-Realistic Black Vinyl Grooves */
+.vinyl-grooves {
+  background-color: #0b0c0e;
+  background-image:
+    radial-gradient(circle at 50% 50%, transparent 0%, transparent 29%, rgba(255, 255, 255, 0.06) 29.3%, #08090b 30%),
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      #0c0d10 0px,
+      #14161b 1.2px,
+      #090a0c 2.4px,
+      #171920 3.6px
+    );
+}
+
+/* Fixed Studio Anisotropic Light Cone Over Rotating Vinyl */
+.vinyl-anisotropic-glare {
+  background: conic-gradient(
+    from 28deg at 50% 50%,
+    rgba(255, 255, 255, 0.22) 0deg,
+    rgba(255, 255, 255, 0.03) 26deg,
+    transparent 65deg,
+    transparent 155deg,
+    rgba(255, 245, 225, 0.18) 180deg,
+    rgba(255, 255, 255, 0.02) 208deg,
+    transparent 250deg,
+    transparent 335deg,
+    rgba(255, 255, 255, 0.22) 360deg
   );
-  box-shadow: 0 0 14px rgba(214, 184, 255, 0.4);
+  mix-blend-mode: screen;
 }
 
-.led-coral {
-  background-color: #f28b76;
-  box-shadow: 0 0 8px rgba(242, 139, 118, 0.85);
+/* Worn Vintage Cardboard Record Label */
+.vinyl-carton-label {
+  background-color: #dfd3bc;
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(60, 42, 24, 0.22) 0%, transparent 18%, transparent 78%, rgba(45, 30, 16, 0.35) 97%, rgba(20, 12, 6, 0.65) 100%),
+    radial-gradient(circle at 28% 32%, rgba(255, 250, 240, 0.45) 0%, transparent 45%),
+    repeating-radial-gradient(circle at 50% 50%, transparent 0px, transparent 14px, rgba(90, 68, 45, 0.07) 15px, transparent 16px),
+    linear-gradient(135deg, #e7dcc6 0%, #cfc0a3 55%, #b8a686 100%);
+  box-shadow:
+    inset 0 0 12px rgba(45, 30, 15, 0.45),
+    0 0 0 2px #090a0d,
+    0 2px 6px rgba(0, 0, 0, 0.8);
+}
+
+/* Greasy / Smudged Curved VU Glass Overlay */
+.greasy-vu-glass {
+  background:
+    radial-gradient(ellipse at 68% 58%, rgba(255, 248, 225, 0.14) 0%, rgba(255, 240, 200, 0.05) 24%, transparent 48%),
+    radial-gradient(ellipse at 34% 42%, rgba(255, 255, 255, 0.09) 0%, transparent 36%),
+    linear-gradient(125deg, rgba(255, 255, 255, 0.24) 0%, rgba(255, 255, 255, 0.04) 36%, transparent 37%, transparent 100%);
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.78),
+    inset 0 -2px 5px rgba(255, 220, 150, 0.15);
+}
+
+/* Continuous 33 1/3 RPM Vinyl Rotation */
+@keyframes vinylSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-vinyl-spin {
+  animation: vinylSpin 1.8s linear infinite;
+}
+
+@keyframes peakLedBlink {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 10px #ff3b30, 0 0 18px rgba(255, 59, 48, 0.8);
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 2px #7f1d1d;
+  }
+}
+
+.animate-peak-blink {
+  animation: peakLedBlink 0.95s ease-in-out infinite;
+}
+
+/* Vintage Recessed Ivory Piano-Key Rocker Switch (Photo 4 Style) */
+.piano-rocker-slot {
+  background: #0d0e12;
+  padding: 3px;
+  border-radius: 5px;
+  box-shadow:
+    inset 0 3px 6px rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.piano-rocker-key {
+  position: relative;
+  border-radius: 3px;
+  background: linear-gradient(
+    180deg,
+    #f3efe2 0%,
+    #dcd5c3 18%,
+    #9f9887 23%,
+    #d6cfc0 30%,
+    #b7b09e 82%,
+    #888171 100%
+  );
+  border: 1px solid #16181d;
+  box-shadow:
+    0 5px 0 #141519,
+    0 7px 10px rgba(0, 0, 0, 0.75),
+    inset 0 1px 1px rgba(255, 255, 255, 0.9);
+  color: #23201b;
+  transition: transform 95ms ease, box-shadow 95ms ease, filter 120ms ease;
+}
+
+.piano-rocker-key-pressed {
+  transform: translateY(3.5px);
+  background: linear-gradient(
+    180deg,
+    #cfc8b6 0%,
+    #b5ae9d 22%,
+    #8c8575 27%,
+    #f7e7be 36%,
+    #e6b665 88%,
+    #9e732b 100%
+  );
+  box-shadow:
+    0 1.5px 0 #141519,
+    0 0 14px rgba(255, 185, 75, 0.45),
+    inset 0 2px 4px rgba(0, 0, 0, 0.45);
 }

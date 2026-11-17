@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+src-tauri/target/
+
 
 # Frontend build output
 dist/
@@ -19,6 +21,7 @@ src-tauri/binaries/*-linux-gnu
 *.flac
 *.ogg
 *.m4a
+*.jpg
 
 # Environment & OS files
 .env

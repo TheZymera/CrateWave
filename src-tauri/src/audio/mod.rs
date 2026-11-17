@@ -86,3 +86,13 @@ pub async fn export_trimmed_sample(
 
     Ok(output_path.to_string_lossy().to_string())
 }
+
+#[tauri::command]
+pub async fn extend_sample_audio(
+    app: tauri::AppHandle,
+    candidate: crate::discovery::SampleCandidate,
+    mode: crate::discovery::DigMode,
+    format: ExportFormat,
+) -> Result<ActiveSample, String> {
+    downloader::extend_and_prepare_full_sample(&app, &candidate, &mode, &format).await
+}

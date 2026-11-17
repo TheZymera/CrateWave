@@ -16,6 +16,11 @@ use tokio::process::Command;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Initial fast-dig cap (90 seconds -> ~2.5-4s total load time)
+const INITIAL_CAPTURE_SEC: u32 = 90;
+/// ~2.8 MB is roughly 90-150s of MP3/OGG/M4A audio from Internet Archive
+const INITIAL_IA_MAX_BYTES: u64 = 2_800_000;
+
 fn emit_progress(app: &AppHandle, job_id: &str, stage: &str, percent: f32, message: &str) {
     let payload = ChopJobProgress {
         job_id: job_id.to_string(),
@@ -41,16 +46,18 @@ struct IaFilesResponse {
 #[derive(Debug, Deserialize)]
 struct IaFileEntry {
     name: String,
-    format: Option<String>,
+    #[serde(default)]
+    _format: Option<String>,
     size: Option<String>,
 }
 
-/// Resolves and downloads the best direct audio file from Internet Archive's Metadata API.
+/// Resolves and downloads audio from Internet Archive's Metadata API (capped when `max_bytes` is Some).
 async fn download_internet_archive_direct(
     app: &AppHandle,
     job_id: &str,
     source_url: &str,
     dest_path: &Path,
+    max_bytes: Option<u64>,
 ) -> Result<(), String> {
     let identifier = source_url
         .trim_end_matches('/')
@@ -60,9 +67,9 @@ async fn download_internet_archive_direct(
 
     let client = reqwest::Client::builder()
         .http1_only()
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CrateWave/1.0")
+        .connect_timeout(Duration::from_secs(12))
+        .read_timeout(Duration::from_secs(25))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CrateWave/2.0")
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
@@ -89,8 +96,12 @@ async fn download_internet_archive_direct(
         if lower.ends_with("_spectrogram.png") || lower.contains(".thumbs/") {
             continue;
         }
-        let size_bytes: u64 = f.size.as_deref().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
-        if size_bytes < 15_000 || size_bytes > 120_000_000 {
+        let size_bytes: u64 = f
+            .size
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1_000_000);
+        if size_bytes < 15_000 || size_bytes > 180_000_000 {
             continue;
         }
 
@@ -121,6 +132,12 @@ async fn download_internet_archive_direct(
     }
 
     let total_bytes = resp.content_length().unwrap_or(0);
+    let target_bytes = match max_bytes {
+        Some(cap) if total_bytes > 0 => total_bytes.min(cap),
+        Some(cap) => cap,
+        None => total_bytes,
+    };
+
     let mut downloaded: u64 = 0;
     let mut out_file =
         fs::File::create(dest_path).map_err(|e| format!("Failed to create temp file: {e}"))?;
@@ -133,30 +150,123 @@ async fn download_internet_archive_direct(
             .map_err(|e| format!("Disk write error: {e}"))?;
         downloaded += chunk.len() as u64;
 
-        if total_bytes > 0 {
-            let pct = (downloaded as f32 / total_bytes as f32) * 100.0;
-            let mapped = 10.0 + (pct.clamp(0.0, 100.0) * 0.62);
+        if target_bytes > 0 {
+            let pct = ((downloaded as f32 / target_bytes as f32) * 100.0).min(100.0);
+            let mapped = 10.0 + (pct * 0.62);
             emit_progress(
                 app,
                 job_id,
                 "downloading",
                 mapped,
-                &format!("Downloading from Archive... {:.0}%", pct),
+                &format!("Capturing Archive audio... {:.0}%", pct),
             );
         }
+
+        if let Some(cap) = max_bytes {
+            if downloaded >= cap {
+                break;
+            }
+        }
+    }
+
+    out_file
+        .flush()
+        .map_err(|e| format!("Disk flush error: {e}"))?;
+    Ok(())
+}
+
+/// Fast single-pass stream capture: resolves direct audio URL with `yt-dlp --get-url`
+/// and captures only `max_seconds` via FFmpeg straight to 44.1kHz PCM WAV.
+async fn try_fast_stream_to_wav(
+    ytdlp_path: &Path,
+    ffmpeg_path: &Path,
+    source_url: &str,
+    master_wav_path: &Path,
+    max_seconds: Option<u32>,
+) -> Result<(), String> {
+    let mut url_cmd = Command::new(ytdlp_path);
+    url_cmd
+        .args([
+            "-f",
+            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            "--get-url",
+            "--no-playlist",
+            "--no-warnings",
+        ])
+        .arg(source_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    url_cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let url_out = tokio::time::timeout(Duration::from_secs(12), url_cmd.output())
+        .await
+        .map_err(|_| "Stream URL resolution timed out".to_string())?
+        .map_err(|e| format!("yt-dlp --get-url error: {e}"))?;
+
+    if !url_out.status.success() {
+        return Err("yt-dlp --get-url returned non-zero".to_string());
+    }
+
+    let stream_url = String::from_utf8_lossy(&url_out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("http"))
+        .ok_or_else(|| "No direct stream URL found".to_string())?
+        .to_string();
+
+    let mut ff_cmd = Command::new(ffmpeg_path);
+    ff_cmd.args([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "3",
+        "-i",
+        &stream_url,
+    ]);
+
+    if let Some(secs) = max_seconds {
+        ff_cmd.args(["-t", &secs.to_string()]);
+    }
+
+    ff_cmd
+        .args(["-vn", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le"])
+        .arg(master_wav_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    ff_cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let ff_out = tokio::time::timeout(Duration::from_secs(35), ff_cmd.output())
+        .await
+        .map_err(|_| "FFmpeg fast stream capture timed out".to_string())?
+        .map_err(|e| format!("FFmpeg stream capture error: {e}"))?;
+
+    if !ff_out.status.success() || !master_wav_path.exists() {
+        let err = String::from_utf8_lossy(&ff_out.stderr);
+        return Err(format!("FFmpeg fast capture failed: {err}"));
     }
 
     Ok(())
 }
 
-pub async fn download_and_prepare_sample(
+pub async fn download_and_prepare_sample_with_limit(
     app: &AppHandle,
     candidate: &SampleCandidate,
     mode: &DigMode,
     format: &ExportFormat,
+    max_seconds: Option<u32>,
 ) -> Result<ActiveSample, String> {
     let job_id = format!("job_{}", sanitize_filename(&candidate.id));
-    emit_progress(app, &job_id, "downloading", 4.0, "Resolving audio stream...");
+    emit_progress(app, &job_id, "downloading", 5.0, "Resolving audio stream...");
 
     let cache_dir = app
         .path()
@@ -168,102 +278,141 @@ pub async fn download_and_prepare_sample(
     let master_wav_path = cache_dir.join(format!("{}_master.wav", job_id));
     let _ = fs::remove_file(&master_wav_path);
 
-    let downloaded_file = if candidate.source == "internet_archive" {
+    if candidate.source == "internet_archive" {
         let direct_raw = cache_dir.join(format!("{}_raw.audio", job_id));
         let _ = fs::remove_file(&direct_raw);
-        download_internet_archive_direct(app, &job_id, &candidate.source_url, &direct_raw).await?;
-        direct_raw
+        let max_bytes = max_seconds.map(|_| INITIAL_IA_MAX_BYTES);
+
+        download_internet_archive_direct(
+            app,
+            &job_id,
+            &candidate.source_url,
+            &direct_raw,
+            max_bytes,
+        )
+        .await?;
+
+        emit_progress(app, &job_id, "decoding", 76.0, "Decoding Master WAV...");
+        processor::decode_to_master_wav(&direct_raw, &master_wav_path).await?;
+        let _ = fs::remove_file(&direct_raw);
     } else {
         let ytdlp_path = resolve_ytdlp_path(app)?;
         let ffmpeg_path = processor::resolve_ffmpeg_path()?;
-        let raw_template = cache_dir.join(format!("{}_raw.%(ext)s", job_id));
 
-        let mut cmd = Command::new(&ytdlp_path);
-        cmd.args([
-            "-f",
-            "bestaudio/best",
-            "--no-playlist",
-            "--newline",
-            "--progress",
-            "--no-warnings",
-            "--ffmpeg-location",
-        ])
-        .arg(ffmpeg_path.parent().unwrap_or(ffmpeg_path.as_ref()))
-        .arg("-o")
-        .arg(&raw_template)
-        .arg(&candidate.source_url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        emit_progress(app, &job_id, "downloading", 18.0, "Fast-capturing audio stream...");
 
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let fast_ok = try_fast_stream_to_wav(
+            &ytdlp_path,
+            &ffmpeg_path,
+            &candidate.source_url,
+            &master_wav_path,
+            max_seconds,
+        )
+        .await
+        .is_ok();
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to start yt-dlp download: {e}"))?;
+        if !fast_ok {
+            // Fallback: use yt-dlp with `--download-sections` so long videos still cap quickly
+            let raw_template = cache_dir.join(format!("{}_raw.%(ext)s", job_id));
+            let mut cmd = Command::new(&ytdlp_path);
+            cmd.args([
+                "-f",
+                "bestaudio/best",
+                "--no-playlist",
+                "--newline",
+                "--progress",
+                "--no-warnings",
+                "--ffmpeg-location",
+            ])
+            .arg(ffmpeg_path.parent().unwrap_or(ffmpeg_path.as_ref()));
 
-        if let Some(stdout) = child.stdout.take() {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(pct) = parse_ytdlp_percent(&line) {
-                    let mapped = 5.0 + (pct.clamp(0.0, 100.0) * 0.67);
-                    emit_progress(
-                        app,
-                        &job_id,
-                        "downloading",
-                        mapped,
-                        &format!("Downloading audio... {:.0}%", pct),
-                    );
+            if let Some(secs) = max_seconds {
+                let end_m = (secs + 5) / 60;
+                let end_s = (secs + 5) % 60;
+                cmd.args([
+                    "--download-sections",
+                    &format!("*0:00-{}:{:02}", end_m, end_s),
+                ]);
+            }
+
+            cmd.arg("-o")
+                .arg(&raw_template)
+                .arg(&candidate.source_url)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("Failed to start yt-dlp download: {e}"))?;
+
+            if let Some(stdout) = child.stdout.take() {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(pct) = parse_ytdlp_percent(&line) {
+                        let mapped = 20.0 + (pct.clamp(0.0, 100.0) * 0.52);
+                        emit_progress(
+                            app,
+                            &job_id,
+                            "downloading",
+                            mapped,
+                            &format!("Capturing audio... {:.0}%", pct),
+                        );
+                    }
                 }
             }
+
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|e| format!("yt-dlp process error: {e}"))?;
+
+            if !output.status.success() {
+                let err_line = String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("unknown error")
+                    .to_string();
+                emit_progress(app, &job_id, "error", 0.0, "Download failed");
+                return Err(format!("yt-dlp download failed: {err_line}"));
+            }
+
+            let prefix = format!("{}_raw.", job_id);
+            let downloaded_file = fs::read_dir(&cache_dir)
+                .map_err(|e| format!("Failed to read cache dir: {e}"))?
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with(&prefix))
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| "Downloaded audio file not found in cache".to_string())?;
+
+            emit_progress(app, &job_id, "decoding", 78.0, "Decoding Master WAV...");
+            processor::decode_to_master_wav(&downloaded_file, &master_wav_path).await?;
+            let _ = fs::remove_file(&downloaded_file);
         }
+    }
 
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| format!("yt-dlp process error: {e}"))?;
-
-        if !output.status.success() {
-            let err_line = String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .last()
-                .unwrap_or("unknown error")
-                .to_string();
-            emit_progress(app, &job_id, "error", 0.0, "Download failed");
-            return Err(format!("yt-dlp download failed: {err_line}"));
-        }
-
-        let prefix = format!("{}_raw.", job_id);
-        fs::read_dir(&cache_dir)
-            .map_err(|e| format!("Failed to read cache dir: {e}"))?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix))
-                    .unwrap_or(false)
-            })
-            .ok_or_else(|| "Downloaded audio file not found in cache".to_string())?
-    };
-
-    emit_progress(app, &job_id, "decoding", 78.0, "Decoding Master WAV...");
-    processor::decode_to_master_wav(&downloaded_file, &master_wav_path).await?;
-    let _ = fs::remove_file(&downloaded_file);
-
-    emit_progress(app, &job_id, "decoding", 90.0, "Probing waveform duration...");
+    emit_progress(app, &job_id, "decoding", 88.0, "Probing waveform duration...");
     let duration_sec = processor::probe_duration_sec(&master_wav_path)
         .await
         .unwrap_or_else(|_| (candidate.duration_sec.max(1)) as f64);
 
-    emit_progress(app, &job_id, "decoding", 95.0, "Writing initial sample to My Samples...");
+    let initial_trim_end = duration_sec.min(16.0);
+
+    emit_progress(app, &job_id, "decoding", 94.0, "Preparing initial loop slice...");
     let samples_dir = resolve_samples_dir()?;
     let exported_path = build_sample_output_path(
         &samples_dir,
         mode,
         &candidate.title,
         0.0,
-        duration_sec,
+        initial_trim_end,
         format,
     );
 
@@ -271,12 +420,12 @@ pub async fn download_and_prepare_sample(
         &master_wav_path,
         &exported_path,
         0.0,
-        duration_sec,
+        initial_trim_end,
         format,
     )
     .await?;
 
-    emit_progress(app, &job_id, "ready", 100.0, "Ready to chop & drag");
+    emit_progress(app, &job_id, "ready", 100.0, "Ready to spin & chop");
 
     Ok(ActiveSample {
         job_id,
@@ -285,7 +434,32 @@ pub async fn download_and_prepare_sample(
         exported_path: exported_path.to_string_lossy().to_string(),
         duration_sec,
         trim_start_sec: 0.0,
-        trim_end_sec: duration_sec,
+        trim_end_sec: initial_trim_end,
         format: format.clone(),
     })
+}
+
+pub async fn download_and_prepare_sample(
+    app: &AppHandle,
+    candidate: &SampleCandidate,
+    mode: &DigMode,
+    format: &ExportFormat,
+) -> Result<ActiveSample, String> {
+    download_and_prepare_sample_with_limit(
+        app,
+        candidate,
+        mode,
+        format,
+        Some(INITIAL_CAPTURE_SEC),
+    )
+    .await
+}
+
+pub async fn extend_and_prepare_full_sample(
+    app: &AppHandle,
+    candidate: &SampleCandidate,
+    mode: &DigMode,
+    format: &ExportFormat,
+) -> Result<ActiveSample, String> {
+    download_and_prepare_sample_with_limit(app, candidate, mode, format, None).await
 }

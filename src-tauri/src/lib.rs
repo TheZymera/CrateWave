@@ -19,6 +19,7 @@ pub fn run() {
             discovery::query_builder::save_query_dictionary,
             discovery::ytdlp_search::update_ytdlp_binary,
             audio::load_and_chop_sample,
+            audio::extend_sample_audio,
             audio::export_trimmed_sample
         ])
         .run(tauri::generate_context!())
