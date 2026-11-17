@@ -31,7 +31,7 @@ export function TopBar({
           CRATEWAVE
         </span>
         <span className="text-[11px] font-mono-tech text-slate-400 bg-[#232736] px-2 py-0.5 rounded border border-[#2E3344]">
-          v1.0
+          v2.0
         </span>
       </div>
 
