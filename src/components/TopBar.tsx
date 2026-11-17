@@ -6,7 +6,6 @@ interface TopBarProps {
   queryUsed: string;
   queryTag: string;
   savedCount: number;
-  queueStatus: string;
   onOpenSamplesFolder: () => void;
   onOpenSettings: () => void;
 }
@@ -15,7 +14,6 @@ export function TopBar({
   queryUsed,
   queryTag,
   savedCount,
-  queueStatus,
   onOpenSamplesFolder,
   onOpenSettings,
 }: TopBarProps) {
@@ -42,12 +40,8 @@ export function TopBar({
         </div>
       </div>
 
-      {/* Right: Ready Stack Status + 3D My Samples & Settings Switches */}
+      {/* Right: 3D My Samples & Settings Switches */}
       <div className="flex items-center gap-2.5 pointer-events-auto">
-        <span className="font-mono-tech text-[10px] text-[#d6c5ab] hidden sm:inline">
-          {queueStatus}
-        </span>
-
         <button
           onClick={onOpenSamplesFolder}
           title="Open My Samples Folder"

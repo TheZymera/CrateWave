@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { TopBar, type WindowSizePreset } from "./components/TopBar";
 import { TurntableStage } from "./components/TurntableStage";
 import { WaveformChopper } from "./components/WaveformChopper";
 import { SettingsModal } from "./components/SettingsModal";
 import { useCrateStore } from "./store/useCrateStore";
+import { TurntableAudioDeck } from "./utils/tapeAudioFx";
 import type {
   ActiveSample,
   SampleCandidate,
@@ -24,7 +25,9 @@ interface ReadyDeckItem {
   sample: ActiveSample;
 }
 
-const TARGET_READY_STACK = 2;
+type ReadyItemPromise = Promise<ReadyDeckItem>;
+
+const TARGET_READY_STACK = 1;
 
 const WINDOW_DIMS: Record<WindowSizePreset, [number, number]> = {
   small: [1100, 620],
@@ -43,20 +46,16 @@ function App() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [vuLevel, setVuLevel] = useState(0);
   const [masterVolume, setMasterVolume] = useState(0.85);
-  const [readyCount, setReadyCount] = useState(0);
 
-  // Continuous 2-Track Ready Stack & Candidate Pool
   const candidatePoolRef = useRef<SampleCandidate[]>([]);
-  const readyStackRef = useRef<ReadyDeckItem[]>([]);
-  const isMaintainingRef = useRef(false);
+  const readyQueueRef = useRef<ReadyItemPromise[]>([]);
+  const isFetchingPoolRef = useRef<Promise<void> | null>(null);
+  const isRerollingRef = useRef(false);
   const generationIdRef = useRef(0);
   const lastFilterSigRef = useRef("");
   const extendedIdsRef = useRef<Set<string>>(new Set());
 
-  // HTML5 Audio + Web Audio Analyser
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
+  const deckRef = useRef<TurntableAudioDeck | null>(null);
   const rafIdRef = useRef<number | null>(null);
 
   const {
@@ -89,96 +88,72 @@ function App() {
     return () => window.removeEventListener("contextmenu", preventContextMenu);
   }, []);
 
-  const refreshStorageCount = () => {
-    invoke<StorageInfo>("init_storage")
-      .then((info) => setStorageInfo(info.samplesDir, info.seenCount))
-      .catch((err) => setError(String(err)));
+  const syncSamplesCountFromDisk = () => {
+  invoke<StorageInfo>("init_storage")
+    .then((info) => setStorageInfo(info.samplesDir, info.seenCount))
+    .catch((err) => setError(String(err)));
   };
 
   useEffect(() => {
-    refreshStorageCount();
+    syncSamplesCountFromDisk();
+    window.addEventListener("focus", syncSamplesCountFromDisk);
+    const interval = window.setInterval(syncSamplesCountFromDisk, 3000);
+    return () => {
+      window.removeEventListener("focus", syncSamplesCountFromDisk);
+      window.clearInterval(interval);
+    };
   }, []);
 
-  // Initialize persistent Audio element
+  // Initialize Pure Web Audio Deck
   useEffect(() => {
-    const audio = new Audio();
-    audio.crossOrigin = "anonymous";
-    audio.volume = masterVolume;
-
-    audio.addEventListener("play", () => setIsPlaying(true));
-    audio.addEventListener("pause", () => setIsPlaying(false));
-    audio.addEventListener("ended", () => setIsPlaying(false));
-
-    audioRef.current = audio;
+    const deck = new TurntableAudioDeck((playing) => {
+      setIsPlaying(playing);
+    });
+    deck.setVolume(masterVolume);
+    deckRef.current = deck;
 
     return () => {
-      audio.pause();
-      audio.src = "";
+      deck.destroy();
+      deckRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = masterVolume;
-    }
+    deckRef.current?.setVolume(masterVolume);
   }, [masterVolume]);
 
-  // Auto-extend 90s-capped tracks when listening approaches the end
+  // 60fps Master VU Needle & Auto-Extend Loop
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !currentCandidate || !activeSample) return;
+    const tick = () => {
+      const deck = deckRef.current;
+      if (deck && deck.isPlaying()) {
+        setVuLevel(deck.getVuLevel());
 
-    const handleTimeUpdate = async () => {
-      const dur = audio.duration;
-      if (!Number.isFinite(dur) || dur <= 0) return;
-
-      const isCappedAround90 = dur >= 84 && dur <= 96;
-      const nearEnd = audio.currentTime >= dur - 18;
-
-      if (
-        isCappedAround90 &&
-        nearEnd &&
-        !extendedIdsRef.current.has(currentCandidate.id)
-      ) {
-        extendedIdsRef.current.add(currentCandidate.id);
-        try {
-          const extended = await invoke<ActiveSample>("extend_sample_audio", {
+        // Check if 45s initial capture needs seamless full-track extension
+        const dur = deck.getDuration();
+        const cur = deck.getCurrentTime();
+        if (
+          currentCandidate &&
+          dur > 10 &&
+          currentCandidate.durationSec > dur + 8 &&
+          cur >= dur - 12 &&
+          !extendedIdsRef.current.has(currentCandidate.id)
+        ) {
+          extendedIdsRef.current.add(currentCandidate.id);
+          invoke<ActiveSample>("extend_sample_audio", {
             candidate: currentCandidate,
             mode: filters.mode,
             format: exportFormat,
-          });
-          const resumeTime = audio.currentTime;
-          const wasPlaying = !audio.paused;
-          setActiveSample(extended);
-          audio.src = convertFileSrc(extended.masterWavPath);
-          audio.currentTime = resumeTime;
-          if (wasPlaying) {
-            await audio.play();
-          }
-        } catch {
-          // Keep current 90s buffer playing uninterrupted if source cannot extend
+          })
+            .then((extended) => {
+              setActiveSample(extended);
+              return deck.swapExtendedBuffer(
+                extended.streamUrl,
+                extended.masterWavPath
+              );
+            })
+            .catch(() => {});
         }
-      }
-    };
-
-    audio.addEventListener("timeupdate", handleTimeUpdate);
-    return () => audio.removeEventListener("timeupdate", handleTimeUpdate);
-  }, [currentCandidate, activeSample, filters.mode, exportFormat]);
-
-  // 60fps Master VU Needle Loop
-  useEffect(() => {
-    const dataArray = new Uint8Array(128);
-
-    const tick = () => {
-      if (isPlaying && analyserRef.current) {
-        analyserRef.current.getByteTimeDomainData(dataArray);
-        let sumSq = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          const norm = (dataArray[i] - 128) / 128;
-          sumSq += norm * norm;
-        }
-        const rms = Math.sqrt(sumSq / dataArray.length);
-        setVuLevel(Math.min(1.12, rms * 3.8 * (0.4 + masterVolume * 0.6)));
       } else {
         setVuLevel(0);
       }
@@ -191,177 +166,148 @@ function App() {
         cancelAnimationFrame(rafIdRef.current);
       }
     };
-  }, [isPlaying, masterVolume]);
+  }, [isPlaying, currentCandidate, filters.mode, exportFormat]);
 
-  const ensureAudioAnalyser = () => {
-    if (!audioRef.current || audioCtxRef.current) return;
-    try {
-      const ctx = new AudioContext();
-      const src = ctx.createMediaElementSource(audioRef.current);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      src.connect(analyser);
-      analyser.connect(ctx.destination);
-      audioCtxRef.current = ctx;
-      analyserRef.current = analyser;
-    } catch (e) {
-      console.warn("WebAudio analyser fallback:", e);
-    }
-  };
+  const ensureCandidatePool = async (genId: number) => {
+    if (candidatePoolRef.current.length > 0) return;
 
-  // Continuous background worker: ALWAYS keeps 2 tracks pre-loaded & ready in stack
-  const maintainReadyStack = async (genId: number) => {
-    if (isMaintainingRef.current) return;
-    isMaintainingRef.current = true;
-
-    try {
-      while (
-        genId === generationIdRef.current &&
-        readyStackRef.current.length < TARGET_READY_STACK
-      ) {
-        if (candidatePoolRef.current.length === 0) {
-          const res = await invoke<RollResponse>("roll_crate", {
-            filters: { ...filters, count: 4 },
-          });
-          if (genId !== generationIdRef.current) break;
-          setRollResult(res.queryUsed, res.queryTag, res.candidates);
-          candidatePoolRef.current.push(...res.candidates);
-        }
-
-        const nextCand = candidatePoolRef.current.shift();
-        if (!nextCand) break;
-
+    if (!isFetchingPoolRef.current) {
+      isFetchingPoolRef.current = (async () => {
         try {
-          const sample = await invoke<ActiveSample>("load_and_chop_sample", {
-            candidate: nextCand,
-            mode: filters.mode,
-            format: exportFormat,
+          const res = await invoke<RollResponse>("roll_crate", {
+            filters: { ...filters, cardCount: 1 },
           });
-          if (genId !== generationIdRef.current) break;
-
-          readyStackRef.current.push({ candidate: nextCand, sample });
-          setReadyCount(readyStackRef.current.length);
-          refreshStorageCount();
-        } catch {
-          // Skip broken candidate automatically and continue filling ready stack
+          if (genId === generationIdRef.current) {
+            setRollResult(res.queryUsed, res.queryTag, res.candidates);
+            candidatePoolRef.current.push(...res.candidates);
+          }
+        } finally {
+          isFetchingPoolRef.current = null;
         }
+      })();
+    }
+
+    await isFetchingPoolRef.current;
+  };
+
+  const createReadySlotPromise = async (genId: number): Promise<ReadyDeckItem> => {
+    let attempts = 0;
+    let lastErr: unknown = new Error("No playable tracks found.");
+
+    while (genId === generationIdRef.current && attempts < 3) {
+      attempts += 1;
+      await ensureCandidatePool(genId);
+      if (genId !== generationIdRef.current) {
+        throw new Error("Filter changed");
       }
-    } finally {
-      isMaintainingRef.current = false;
+
+      const cand = candidatePoolRef.current.shift();
+      if (!cand) {
+        throw new Error("No tracks found for this filter combination.");
+      }
+
+      try {
+        const sample = await invoke<ActiveSample>("load_and_chop_sample", {
+          candidate: cand,
+          mode: filters.mode,
+          format: exportFormat,
+        });
+        if (genId !== generationIdRef.current) {
+          throw new Error("Filter changed");
+        }
+        return { candidate: cand, sample };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr;
+  };
+
+  const topUpReadyQueue = (genId: number) => {
+    while (
+      genId === generationIdRef.current &&
+      readyQueueRef.current.length < TARGET_READY_STACK
+    ) {
+      const slotPromise = createReadySlotPromise(genId);
+      slotPromise.catch(() => {});
+      readyQueueRef.current.push(slotPromise);
     }
   };
 
-  // Reset & immediately pre-warm 2 ready tracks whenever filters/mode change
   useEffect(() => {
     if (lastFilterSigRef.current === filterSig) return;
     lastFilterSigRef.current = filterSig;
 
     generationIdRef.current += 1;
     candidatePoolRef.current = [];
-    readyStackRef.current = [];
-    setReadyCount(0);
-    isMaintainingRef.current = false;
+    readyQueueRef.current = [];
+    isFetchingPoolRef.current = null;
 
-    maintainReadyStack(generationIdRef.current);
+    topUpReadyQueue(generationIdRef.current);
   }, [filterSig]);
 
-  const startDeckPlayback = async (item: ReadyDeckItem) => {
-    setCurrentCandidate(item.candidate);
-    setActiveSample(item.sample);
-
-    if (audioRef.current) {
-      ensureAudioAnalyser();
-      if (audioCtxRef.current?.state === "suspended") {
-        await audioCtxRef.current.resume();
-      }
-      audioRef.current.src = convertFileSrc(item.sample.masterWavPath);
-      await audioRef.current.play();
-    }
-  };
-
-  // Click Center Carton Label -> Instant Pop from Ready Stack + Trigger Background Refill
   const handleRerollCenter = async () => {
-    if (isLoadingTrack) return;
+    if (isRerollingRef.current || isLoadingTrack) return;
+    isRerollingRef.current = true;
     setError(null);
 
-    if (audioRef.current) {
-      audioRef.current.pause();
-    }
-    setIsPlaying(false);
-
-    const activeGen = generationIdRef.current;
-
-    // Fast path: pop an already-loaded track from our 2-track ready stack
-    const readyItem = readyStackRef.current.shift();
-    if (readyItem) {
-      setReadyCount(readyStackRef.current.length);
-      try {
-        await startDeckPlayback(readyItem);
-      } catch (err) {
-        setError(String(err));
-      }
-      // Immediately replenish stack back to 2 ready tracks
-      maintainReadyStack(activeGen);
-      return;
-    }
-
-    // Cold-start path: fetch + load Track 1 immediately, then fill 2 ready tracks behind it
-    setIsLoadingTrack(true);
-    setLoadingMessage("DIGGING CRATE (90S FAST CAPTURE)...");
-
     try {
-      if (candidatePoolRef.current.length === 0) {
-        const res = await invoke<RollResponse>("roll_crate", {
-          filters: { ...filters, count: 4 },
-        });
-        setRollResult(res.queryUsed, res.queryTag, res.candidates);
-        candidatePoolRef.current.push(...res.candidates);
+      const activeGen = generationIdRef.current;
+      const deck = deckRef.current;
+
+      // 1. Tape-stop currently playing record first
+      if (deck && deck.isPlaying()) {
+        await deck.tapeStop(340);
       }
 
-      const firstCand = candidatePoolRef.current.shift();
-      if (!firstCand) {
-        throw new Error("No tracks found for this filter combination.");
-      }
+      // 2. Pop next track & immediately start preparing the next background track
+      topUpReadyQueue(activeGen);
+      const nextSlotPromise = readyQueueRef.current.shift();
+      topUpReadyQueue(activeGen);
 
-      setCurrentCandidate(firstCand);
+      if (!nextSlotPromise) return;
+
+      setIsLoadingTrack(true);
       setLoadingMessage("DROPPING NEEDLE...");
 
-      const firstSample = await invoke<ActiveSample>("load_and_chop_sample", {
-        candidate: firstCand,
-        mode: filters.mode,
-        format: exportFormat,
-      });
-      refreshStorageCount();
+      const readyItem = await nextSlotPromise;
+      if (activeGen !== generationIdRef.current) return;
 
-      await startDeckPlayback({ candidate: firstCand, sample: firstSample });
+      setCurrentCandidate(readyItem.candidate);
+      setActiveSample(readyItem.sample);
+      setIsLoadingTrack(false);
+      setLoadingMessage("");
 
-      // Start background worker to fill the 2-track ready stack
-      maintainReadyStack(activeGen);
+      // 3. Decode & spin up with analog tape-start
+      if (deck) {
+        await deck.loadAndTapeStart(
+          readyItem.sample.streamUrl,
+          readyItem.sample.masterWavPath,
+          300
+        );
+      }
     } catch (err) {
       setError(String(err));
     } finally {
       setIsLoadingTrack(false);
       setLoadingMessage("");
+      isRerollingRef.current = false;
     }
   };
 
   const handlePlay = async () => {
-    if (!audioRef.current || !activeSample) return;
-    ensureAudioAnalyser();
-    if (audioCtxRef.current?.state === "suspended") {
-      await audioCtxRef.current.resume();
-    }
-    await audioRef.current.play().catch(console.error);
+    if (!deckRef.current || !activeSample || isRerollingRef.current) return;
+    await deckRef.current.tapeStartCurrent(300).catch((err) => setError(String(err)));
   };
 
-  const handleStop = () => {
-    if (!audioRef.current) return;
-    audioRef.current.pause();
+  const handleStop = async () => {
+    if (!deckRef.current || isRerollingRef.current) return;
+    await deckRef.current.tapeStop(340);
   };
 
-  const handleOpenTrim = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
+  const handleOpenTrim = async () => {
+    if (deckRef.current && deckRef.current.isPlaying()) {
+      await deckRef.current.tapeStop(260);
     }
     setTrimModalOpen(true);
   };
@@ -388,7 +334,6 @@ function App() {
         queryUsed={queryUsed}
         queryTag={queryTag}
         savedCount={savedCount}
-        queueStatus={`READY STACK: ${readyCount}/${TARGET_READY_STACK}`}
         onOpenSamplesFolder={handleOpenSamples}
         onOpenSettings={() => setSettingsOpen(true)}
       />
@@ -417,7 +362,7 @@ function App() {
           exportFormat={exportFormat}
           onUpdateSample={(updated) => {
             setActiveSample(updated);
-            refreshStorageCount();
+            syncSamplesCountFromDisk();
           }}
           onClose={() => setTrimModalOpen(false)}
         />

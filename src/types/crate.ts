@@ -38,6 +38,7 @@ export interface ActiveSample {
   trimStartSec: number;
   trimEndSec: number;
   format: ExportFormat;
+  streamUrl?: string;
 }
 
 export interface StorageInfo {

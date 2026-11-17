@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Disc3 } from "lucide-react";
 import { Turntable3DCanvas } from "./Turntable3DCanvas";
 import { useCrateStore } from "../store/useCrateStore";
@@ -45,6 +46,42 @@ export function TurntableStage({
 }: TurntableStageProps) {
   const { filters } = useCrateStore();
 
+  // Mode-based filter availability matrix:
+  // general: all enabled
+  // world_adventure: disable TYPE and LENGTH
+  // only_instrumental: all enabled
+  // only_vocal: disable TYPE and GENRE
+  const isTypeDisabled =
+    filters.mode === "world_adventure" || filters.mode === "only_vocal";
+  const isLengthDisabled = filters.mode === "world_adventure";
+  const isGenreDisabled = filters.mode === "only_vocal";
+
+  // Automatically reset locked filters back to "all" when switching modes
+  useEffect(() => {
+    const patch: Partial<typeof filters> = {};
+    if (isTypeDisabled && filters.sampleType !== "all") {
+      patch.sampleType = "all";
+    }
+    if (isLengthDisabled && filters.duration !== "any") {
+      patch.duration = "any";
+    }
+    if (isGenreDisabled && filters.genre !== "all") {
+      patch.genre = "all";
+    }
+    if (Object.keys(patch).length > 0) {
+      useCrateStore.setState((state) => ({
+        filters: { ...state.filters, ...patch },
+      }));
+    }
+  }, [
+    filters.mode,
+    filters.sampleType,
+    filters.duration,
+    filters.genre,
+    isTypeDisabled,
+    isLengthDisabled,
+    isGenreDisabled,
+  ]);
   const updateFilter = <K extends keyof typeof filters>(
     key: K,
     value: (typeof filters)[K]
@@ -136,16 +173,18 @@ export function TurntableStage({
         </div>
 
         <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+          {/* TYPE */}
           <label className="flex flex-col gap-0.5">
             <span className="font-chassis text-[9px] font-bold uppercase text-[#b5a48b]">
-              TYPE
+              TYPE {isTypeDisabled ? "(LOCKED)" : ""}
             </span>
             <select
-              value={filters.sampleType}
+              disabled={isTypeDisabled}
+              value={isTypeDisabled ? "all" : filters.sampleType}
               onChange={(e) =>
                 updateFilter("sampleType", e.target.value as typeof filters.sampleType)
               }
-              className="bg-[#14110e] border border-[#3d3328] rounded px-1.5 py-1 text-[#f2eadc] font-chassis text-xs outline-none focus:border-[#ffb347]"
+              className="bg-[#14110e] border border-[#3d3328] rounded px-1.5 py-1 text-[#f2eadc] font-chassis text-xs outline-none focus:border-[#ffb347] disabled:opacity-35 disabled:cursor-not-allowed"
             >
               <option value="all">All Types</option>
               <option value="drums">Drum Breaks</option>
@@ -157,6 +196,7 @@ export function TurntableStage({
             </select>
           </label>
 
+          {/* REGION */}
           <label className="flex flex-col gap-0.5">
             <span className="font-chassis text-[9px] font-bold uppercase text-[#b5a48b]">
               REGION
@@ -186,6 +226,7 @@ export function TurntableStage({
             </select>
           </label>
 
+          {/* DECADE */}
           <label className="flex flex-col gap-0.5">
             <span className="font-chassis text-[9px] font-bold uppercase text-[#b5a48b]">
               DECADE
@@ -208,16 +249,18 @@ export function TurntableStage({
             </select>
           </label>
 
+          {/* LENGTH */}
           <label className="flex flex-col gap-0.5">
             <span className="font-chassis text-[9px] font-bold uppercase text-[#b5a48b]">
-              LENGTH
+              LENGTH {isLengthDisabled ? "(LOCKED)" : ""}
             </span>
             <select
-              value={filters.duration}
+              disabled={isLengthDisabled}
+              value={isLengthDisabled ? "all" : filters.duration}
               onChange={(e) =>
                 updateFilter("duration", e.target.value as typeof filters.duration)
               }
-              className="bg-[#14110e] border border-[#3d3328] rounded px-1.5 py-1 text-[#f2eadc] font-chassis text-xs outline-none focus:border-[#ffb347]"
+              className="bg-[#14110e] border border-[#3d3328] rounded px-1.5 py-1 text-[#f2eadc] font-chassis text-xs outline-none focus:border-[#ffb347] disabled:opacity-35 disabled:cursor-not-allowed"
             >
               <option value="all">Any Length</option>
               <option value="shorts">Shorts (&lt;60s)</option>
@@ -227,16 +270,18 @@ export function TurntableStage({
             </select>
           </label>
 
+          {/* GENRE */}
           <label className="col-span-2 flex flex-col gap-0.5">
             <span className="font-chassis text-[9px] font-bold uppercase text-[#b5a48b]">
-              GENRE
+              GENRE {isGenreDisabled ? "(LOCKED)" : ""}
             </span>
             <select
-              value={filters.genre}
+              disabled={isGenreDisabled}
+              value={isGenreDisabled ? "all" : filters.genre}
               onChange={(e) =>
                 updateFilter("genre", e.target.value as typeof filters.genre)
               }
-              className="bg-[#14110e] border border-[#3d3328] rounded px-1.5 py-1 text-[#f2eadc] font-chassis text-xs outline-none focus:border-[#ffb347]"
+              className="bg-[#14110e] border border-[#3d3328] rounded px-1.5 py-1 text-[#f2eadc] font-chassis text-xs outline-none focus:border-[#ffb347] disabled:opacity-35 disabled:cursor-not-allowed"
             >
               <option value="all">All Genres</option>
               <option value="jazz">Jazz</option>

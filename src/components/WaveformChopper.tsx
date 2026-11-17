@@ -5,6 +5,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { Play, Pause, Scissors, GripVertical, ArrowLeft, Check } from "lucide-react";
 import { VuMeter } from "./VuMeter";
+import { useCrateStore } from "../store/useCrateStore";
 import type { ActiveSample, ExportFormat } from "../types/crate";
 
 interface WaveformChopperProps {
@@ -26,9 +27,25 @@ export function WaveformChopper({
   onUpdateSample,
   onClose,
 }: WaveformChopperProps) {
+  const mode = useCrateStore((state) => state.filters.mode);
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const regionRef = useRef<Region | null>(null);
+
+  // Dedicated Web Audio Engine for Loop Playback + Real Stereo L/R Analysers
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioBufferRef = useRef<AudioBuffer | null>(null);
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const analyserLRef = useRef<AnalyserNode | null>(null);
+  const analyserRRef = useRef<AnalyserNode | null>(null);
+  const playingRef = useRef(false);
+  const playStartCtxTimeRef = useRef(0);
+  const playStartOffsetRef = useRef(0);
+  const loopBoundsRef = useRef<{ start: number; end: number }>({
+    start: 0,
+    end: Math.min(sample.durationSec || 16, 16),
+  });
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [startSec, setStartSec] = useState(0);
@@ -36,17 +53,126 @@ export function WaveformChopper({
     Math.min(sample.durationSec || 16, 16)
   );
   const [isExporting, setIsExporting] = useState(false);
-  const [exportSavedToast, setExportSavedToast] = useState(false);
+  const [isAddedToSamples, setIsAddedToSamples] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [vuLeft, setVuLeft] = useState(0);
   const [vuRight, setVuRight] = useState(0);
   const [dragFilePath, setDragFilePath] = useState(sample.masterWavPath);
 
   useEffect(() => {
     setDragFilePath(sample.masterWavPath);
+    setIsAddedToSamples(false);
+    setExportError(null);
   }, [sample.masterWavPath]);
+
+  const stopWebAudioLoop = () => {
+    playingRef.current = false;
+    setIsPlaying(false);
+    setVuLeft(0);
+    setVuRight(0);
+
+    if (sourceNodeRef.current) {
+      try {
+        sourceNodeRef.current.onended = null;
+        sourceNodeRef.current.stop();
+        sourceNodeRef.current.disconnect();
+      } catch {
+        // Already stopped
+      }
+      sourceNodeRef.current = null;
+    }
+  };
+
+  const startWebAudioLoop = async (fromOffsetSec?: number) => {
+    let ctx = audioCtxRef.current;
+    if (!ctx) {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      ctx = new AudioCtx();
+      audioCtxRef.current = ctx;
+    }
+    if (ctx.state === "suspended") {
+      await ctx.resume();
+    }
+
+    let buffer = audioBufferRef.current;
+    if (!buffer) {
+      const audioUrl = sample.streamUrl || convertFileSrc(sample.masterWavPath);
+      const resp = await fetch(audioUrl);
+      const arr = await resp.arrayBuffer();
+      buffer = await ctx.decodeAudioData(arr.slice(0));
+      audioBufferRef.current = buffer;
+    }
+
+    stopWebAudioLoop();
+
+    const { start, end } = loopBoundsRef.current;
+    const safeStart = Math.max(0, Math.min(start, buffer.duration - 0.05));
+    const safeEnd = Math.max(safeStart + 0.1, Math.min(end, buffer.duration));
+    const offset =
+      fromOffsetSec !== undefined &&
+      fromOffsetSec >= safeStart &&
+      fromOffsetSec < safeEnd
+        ? fromOffsetSec
+        : safeStart;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    src.loopStart = safeStart;
+    src.loopEnd = safeEnd;
+
+    const splitter = ctx.createChannelSplitter(2);
+    const analyserL = ctx.createAnalyser();
+    const analyserR = ctx.createAnalyser();
+    analyserL.fftSize = 256;
+    analyserR.fftSize = 256;
+    analyserL.smoothingTimeConstant = 0.6;
+    analyserR.smoothingTimeConstant = 0.6;
+
+    src.connect(splitter);
+    splitter.connect(analyserL, 0);
+    splitter.connect(
+      analyserR,
+      buffer.numberOfChannels > 1 ? 1 : 0
+    );
+
+    // Connect audio output to speakers
+    src.connect(ctx.destination);
+
+    analyserLRef.current = analyserL;
+    analyserRRef.current = analyserR;
+    sourceNodeRef.current = src;
+
+    playStartCtxTimeRef.current = ctx.currentTime;
+    playStartOffsetRef.current = offset;
+    playingRef.current = true;
+    setIsPlaying(true);
+
+    src.start(0, offset);
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
+
+    const audioUrl = sample.streamUrl || convertFileSrc(sample.masterWavPath);
+    audioBufferRef.current = null;
+
+    // Pre-decode AudioBuffer immediately on mount
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new AudioCtx();
+    audioCtxRef.current = ctx;
+
+    fetch(audioUrl)
+      .then((r) => r.arrayBuffer())
+      .then((arr) => ctx.decodeAudioData(arr.slice(0)))
+      .then((decoded) => {
+        audioBufferRef.current = decoded;
+      })
+      .catch((err) => console.error("Trim decode error:", err));
 
     const regions = RegionsPlugin.create();
     const ws = WaveSurfer.create({
@@ -60,15 +186,20 @@ export function WaveformChopper({
       barRadius: 1,
       height: 145,
       normalize: true,
-      url: convertFileSrc(sample.masterWavPath),
+      interact: true,
+      url: audioUrl,
       plugins: [regions],
     });
+
+    // Mute WaveSurfer's internal HTML5 element so only our WebAudio loop engine plays
+    ws.setVolume(0);
 
     ws.on("ready", () => {
       const dur = ws.getDuration();
       const initialEnd = Math.min(dur, 16);
       setStartSec(0);
       setEndSec(initialEnd);
+      loopBoundsRef.current = { start: 0, end: initialEnd };
 
       const reg = regions.addRegion({
         start: 0,
@@ -81,32 +212,101 @@ export function WaveformChopper({
       reg.on("update", () => {
         setStartSec(reg.start);
         setEndSec(reg.end);
+        loopBoundsRef.current = { start: reg.start, end: reg.end };
+        if (sourceNodeRef.current) {
+          sourceNodeRef.current.loopStart = reg.start;
+          sourceNodeRef.current.loopEnd = Math.max(reg.start + 0.1, reg.end);
+        }
+        setIsAddedToSamples(false);
+        setExportError(null);
       });
 
       regionRef.current = reg;
     });
 
-    ws.on("play", () => setIsPlaying(true));
-    ws.on("pause", () => setIsPlaying(false));
-    ws.on("finish", () => setIsPlaying(false));
-
-    ws.on("audioprocess", (time) => {
-      const reg = regionRef.current;
-      if (reg && time >= reg.end) {
-        ws.setTime(reg.start);
+    // If user clicks directly on waveform, jump loop position there
+    ws.on("interaction", (newTime) => {
+      if (playingRef.current) {
+        startWebAudioLoop(newTime);
       }
-      const pulse = 0.48 + Math.sin(time * 19) * 0.22 + Math.cos(time * 31) * 0.16;
-      setVuLeft(Math.max(0.15, Math.min(0.95, pulse)));
-      setVuRight(Math.max(0.15, Math.min(0.95, pulse * 0.94 + 0.06)));
     });
 
     wsRef.current = ws;
 
     return () => {
+      stopWebAudioLoop();
       ws.destroy();
       wsRef.current = null;
+      ctx.close().catch(() => {});
+      audioCtxRef.current = null;
     };
   }, [sample.masterWavPath]);
+
+  // 60fps Hardware AnalyserNode Loop for L/R VU Needles + Playhead Sync
+  // 60fps Stereo VU Metering + Playhead Sync driven directly by AudioContext clock & PCM buffer
+  useEffect(() => {
+    if (!isPlaying) {
+      setVuLeft(0);
+      setVuRight(0);
+      return;
+    }
+
+    let rafId = 0;
+    let smoothL = 0;
+    let smoothR = 0;
+
+    const tick = () => {
+      const ctx = audioCtxRef.current;
+      const buf = audioBufferRef.current;
+
+      if (playingRef.current && ctx && buf) {
+        const { start, end } = loopBoundsRef.current;
+        const loopLen = Math.max(0.1, end - start);
+        const elapsed = Math.max(0, ctx.currentTime - playStartCtxTimeRef.current);
+        const relPos =
+          ((playStartOffsetRef.current - start + elapsed) % loopLen + loopLen) %
+          loopLen;
+        const currentSec = start + relPos;
+
+        // 1. Move WaveSurfer cursor
+        wsRef.current?.setTime(currentSec);
+
+        // 2. Compute exact L/R RMS from the decoded AudioBuffer at `currentSec`
+        const sr = buf.sampleRate;
+        const centerIdx = Math.floor(currentSec * sr);
+        const winSize = 1024;
+        const iStart = Math.max(0, centerIdx - winSize / 2);
+        const ch0 = buf.getChannelData(0);
+        const ch1 = buf.getChannelData(buf.numberOfChannels > 1 ? 1 : 0);
+        const iEnd = Math.min(ch0.length, iStart + winSize);
+        const count = Math.max(1, iEnd - iStart);
+
+        let sumL = 0;
+        let sumR = 0;
+        for (let i = iStart; i < iEnd; i++) {
+          const l = ch0[i];
+          const r = ch1[i];
+          sumL += l * l;
+          sumR += r * r;
+        }
+
+        const targetL = Math.min(1.15, Math.sqrt(sumL / count) * 4.2);
+        const targetR = Math.min(1.15, Math.sqrt(sumR / count) * 4.2);
+
+        // Smooth ballistic attack/release for authentic analog needle motion
+        smoothL = smoothL + (targetL - smoothL) * 0.35;
+        smoothR = smoothR + (targetR - smoothR) * 0.35;
+
+        setVuLeft(smoothL);
+        setVuRight(smoothR);
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -120,49 +320,40 @@ export function WaveformChopper({
   });
 
   const togglePlayRegion = () => {
-    const ws = wsRef.current;
-    const reg = regionRef.current;
-    if (!ws) return;
-    if (ws.isPlaying()) {
-      ws.pause();
+    if (playingRef.current) {
+      stopWebAudioLoop();
     } else {
-      if (reg && (ws.getCurrentTime() < reg.start || ws.getCurrentTime() >= reg.end)) {
-        ws.setTime(reg.start);
-      }
-      ws.play();
+      startWebAudioLoop(loopBoundsRef.current.start);
     }
   };
 
   const handleTrimAndExport = async () => {
+    if (isExporting) return;
     setIsExporting(true);
+    setExportError(null);
+
     try {
-      const res = await invoke<unknown>("export_trimmed_sample", {
-        sample,
+      const exportedPath = await invoke<string>("export_trimmed_sample", {
+        masterWavPath: sample.masterWavPath,
+        title: sample.title,
+        mode,
         startSec,
         endSec,
         format: exportFormat,
       });
 
-      if (typeof res === "string") {
-        setDragFilePath(res);
-      } else if (res && typeof res === "object") {
-        const obj = res as Record<string, unknown>;
-        const nextPath =
-          (typeof obj.exportedPath === "string" && obj.exportedPath) ||
-          (typeof obj.trimmedPath === "string" && obj.trimmedPath) ||
-          (typeof obj.outputPath === "string" && obj.outputPath) ||
-          (typeof obj.masterWavPath === "string" && obj.masterWavPath);
-
-        if (nextPath) setDragFilePath(nextPath);
-        if (typeof obj.masterWavPath === "string") {
-          onUpdateSample(res as ActiveSample);
-        }
-      }
-
-      setExportSavedToast(true);
-      setTimeout(() => setExportSavedToast(false), 2200);
+      setDragFilePath(exportedPath);
+      onUpdateSample({
+        ...sample,
+        trimStartSec: startSec,
+        trimEndSec: endSec,
+        format: exportFormat,
+        exportedPath,
+      });
+      setIsAddedToSamples(true);
     } catch (err) {
       console.error("Trim failed:", err);
+      setExportError(String(err));
     } finally {
       setIsExporting(false);
     }
@@ -192,7 +383,10 @@ export function WaveformChopper({
       <div className="relative z-10 flex items-center justify-between border-b border-[#c9a36b]/35 pb-3">
         <div className="flex items-center gap-3">
           <button
-            onClick={onClose}
+            onClick={() => {
+              stopWebAudioLoop();
+              onClose();
+            }}
             className="hw-key px-3 py-1.5 flex items-center gap-1.5 font-chassis text-xs font-bold tracking-wider uppercase cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
@@ -215,6 +409,13 @@ export function WaveformChopper({
           <VuMeter level={vuRight} isPlaying={isPlaying} label="CH R • VU" compact />
         </div>
       </div>
+
+      {/* Error Banner if Export Fails */}
+      {exportError && (
+        <div className="relative z-20 mx-auto px-4 py-1.5 rounded bg-[#361116] border border-rose-500/70 text-rose-200 font-mono-tech text-xs">
+          {exportError}
+        </div>
+      )}
 
       {/* Center: VU-Meter-Styled Trim Timeline Window */}
       <div className="relative z-10 my-3 rounded-xl bg-[#130b09] p-3 border-2 border-[#c9a36b]/45 shadow-[inset_0_4px_18px_rgba(0,0,0,0.95),0_10px_25px_rgba(0,0,0,0.85)]">
@@ -255,14 +456,20 @@ export function WaveformChopper({
           <button
             onClick={handleTrimAndExport}
             disabled={isExporting}
-            className="hw-key hw-key-lit-amber px-5 py-2.5 flex items-center gap-2 font-chassis text-sm font-extrabold tracking-widest uppercase cursor-pointer disabled:opacity-50"
+            className={`hw-key px-5 py-2.5 flex items-center gap-2 font-chassis text-sm font-extrabold tracking-widest uppercase cursor-pointer disabled:opacity-50 ${
+              isAddedToSamples ? "hw-key-lit-green" : "hw-key-lit-amber"
+            }`}
           >
-            {exportSavedToast ? <Check className="w-4 h-4" /> : <Scissors className="w-4 h-4" />}
+            {isAddedToSamples ? (
+              <Check className="w-4 h-4 text-emerald-950" />
+            ) : (
+              <Scissors className="w-4 h-4" />
+            )}
             <span>
               {isExporting
                 ? "PRINTING..."
-                : exportSavedToast
-                ? "SAVED TO MY SAMPLES"
+                : isAddedToSamples
+                ? "ADDED TO SAMPLES"
                 : "TRIM & EXPORT"}
             </span>
           </button>

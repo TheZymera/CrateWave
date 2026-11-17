@@ -11,9 +11,11 @@ export function VuMeter({
   label = "MASTER VU",
   compact = false,
 }: VuMeterProps) {
-  const clamped = Math.max(0, Math.min(1.15, isPlaying ? level : 0));
-  const angle = -44 + clamped * 75;
-  const isPeaking = isPlaying && clamped > 0.78;
+  const safeLevel = Number.isFinite(level) ? level : 0;
+  const clamped = Math.max(0, Math.min(1.15, isPlaying ? safeLevel : 0));
+  // -48deg (-20 dB) -> +24deg (0 dB junction) -> +48deg (+3 dB)
+  const angle = -48 + (clamped / 1.15) * 96;
+  const isPeaking = isPlaying && clamped > 0.86;
 
   return (
     <div
@@ -32,35 +34,40 @@ export function VuMeter({
         {/* Warm Tungsten Backlit Dial Card */}
         <div className="relative w-full h-full rounded-[4px] overflow-hidden bg-[radial-gradient(ellipse_at_50%_78%,#ffe6a3_0%,#f0b048_55%,#8f5814_100%)] shadow-[inset_0_6px_12px_rgba(28,14,2,0.65)]">
           <svg viewBox="0 0 200 105" className="w-full h-full">
+            {/* Concentric Black Scale Arc (-48deg to +24deg around pivot 100,102, R=76) */}
             <path
-              d="M 28 72 A 86 86 0 0 1 138 35"
+              d="M 43.52 51.15 A 76 76 0 0 1 130.91 32.57"
               fill="none"
               stroke="#1f160c"
-              strokeWidth="2.2"
+              strokeWidth="2.4"
+              strokeLinecap="round"
             />
+            {/* Exact Continuation Red Overload Arc (+24deg to +48deg around pivot 100,102, R=76) */}
             <path
-              d="M 138 35 A 86 86 0 0 1 174 52"
+              d="M 130.91 32.57 A 76 76 0 0 1 156.48 51.15"
               fill="none"
               stroke="#b91c1c"
-              strokeWidth="3.2"
+              strokeWidth="3.0"
+              strokeLinecap="round"
             />
 
-            <g className="font-mono-tech text-[9px] font-bold" fill="#231709">
-              <text x="23" y="61">20</text>
-              <text x="48" y="45">10</text>
-              <text x="75" y="34">7</text>
-              <text x="98" y="29">5</text>
-              <text x="118" y="28">3</text>
-              <text x="135" y="29">0</text>
+            {/* Concentric dB Scale Numbers (R=86 from 100,102) */}
+            <g className="font-mono-tech text-[8.5px] font-bold" fill="#231709" textAnchor="middle">
+              <text x="36" y="45">20</text>
+              <text x="57" y="28">10</text>
+              <text x="79" y="19">7</text>
+              <text x="100" y="16">5</text>
+              <text x="118" y="18">3</text>
+              <text x="135" y="24">0</text>
             </g>
-            <g className="font-mono-tech text-[9px] font-bold" fill="#b91c1c">
-              <text x="152" y="34">+1</text>
-              <text x="169" y="44">+3</text>
+            <g className="font-mono-tech text-[8.5px] font-bold" fill="#b91c1c" textAnchor="middle">
+              <text x="151" y="33">+1</text>
+              <text x="165" y="46">+3</text>
             </g>
 
             <text
               x="100"
-              y="64"
+              y="66"
               textAnchor="middle"
               fill="#3a2510"
               className="font-chassis text-[10px] font-extrabold tracking-[0.2em]"
@@ -68,36 +75,28 @@ export function VuMeter({
               {label}
             </text>
 
-            {/* Physical Needle + Cast Paper Drop Shadow */}
-            <g
-              style={{
-                transform: `rotate(${angle}deg)`,
-                transformOrigin: "100px 102px",
-                transition: isPlaying
-                  ? "transform 65ms cubic-bezier(0.22, 1, 0.36, 1)"
-                  : "transform 350ms ease-out",
-              }}
-            >
+            {/* Physical Needle + Cast Paper Drop Shadow (Native SVG Pivot 100,102) */}
+            <g transform={`rotate(${angle.toFixed(2)}, 100, 102)`}>
               <line
-                x1="104"
+                x1="103"
                 y1="102"
-                x2="104"
-                y2="18"
-                stroke="rgba(35,16,3,0.34)"
-                strokeWidth="2.6"
+                x2="103"
+                y2="23"
+                stroke="rgba(35,16,3,0.32)"
+                strokeWidth="2.4"
               />
               <line
                 x1="100"
                 y1="102"
                 x2="100"
-                y2="16"
+                y2="21"
                 stroke="#19120b"
                 strokeWidth="1.9"
                 strokeLinecap="round"
               />
             </g>
 
-            <circle cx="100" cy="98" r="15" fill="#141519" />
+            <circle cx="100" cy="98" r="14" fill="#141519" />
           </svg>
 
           {/* 3D Chrome-Ringed Blinking Red Jewel Lamp */}
