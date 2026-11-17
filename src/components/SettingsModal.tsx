@@ -20,9 +20,9 @@ interface SettingsModalProps {
 }
 
 const SIZE_OPTIONS: { id: WindowSizePreset; label: string; dims: string }[] = [
-  { id: "small", label: "Small", dims: "1470 × 770" },
-  { id: "medium", label: "Medium", dims: "1650 × 930" },
-  { id: "big", label: "Big", dims: "2000 × 1200" },
+  { id: "small", label: "Small", dims: "1100 × 620" },
+  { id: "medium", label: "Medium", dims: "1470 × 770" },
+  { id: "big", label: "Big", dims: "1650 × 930" },
 ];
 
 type BubbleSectionKey = "generalQueries" | "crateModifiers" | "vocalFullQueries";

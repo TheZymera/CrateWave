@@ -23,9 +23,9 @@ interface RollResponse {
 }
 
 const WINDOW_DIMS: Record<WindowSizePreset, [number, number]> = {
-  small: [1470, 770],
-  medium: [1650, 930],
-  big: [2000, 1200],
+  small: [1100, 620],
+  medium: [1470, 770],
+  big: [1650, 930],
 };
 
 function App() {

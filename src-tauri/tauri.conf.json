@@ -13,8 +13,8 @@
                 "windows": [
                     {
                     "title": "CrateWave",
-                    "width": 1650,
-                    "height": 930,
+                    "width": 1100,
+                    "height": 620,
                     "resizable": false,
                     "center": true
                     }

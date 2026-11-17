@@ -232,134 +232,193 @@ fn random_year_from_decade(decade: &str) -> Option<(u32, String)> {
     Some((year, decade.to_string()))
 }
 
+fn format_region_clean(region: &str) -> Option<&'static str> {
+    match region {
+        "africa" => Some("african"),
+        "asia" => Some("asian"),
+        "europe" => Some("european"),
+        "latin_america" => Some("latin"),
+        "middle_east" => Some("middle eastern"),
+        "japan" => Some("japanese"),
+        "brazil" => Some("brazilian"),
+        "france" => Some("french"),
+        "italy" => Some("italian"),
+        "turkey" => Some("turkish"),
+        "ethiopia" => Some("ethiopian"),
+        "india" => Some("indian"),
+        "ussr" => Some("soviet"),
+        "caribbean" => Some("caribbean"),
+        _ => None,
+    }
+}
+
+fn format_decade_clean(decade: &str) -> Option<&'static str> {
+    match decade {
+        "1950s" => Some("1950s"),
+        "1960s" => Some("1960s"),
+        "1970s" => Some("1970s"),
+        "1980s" => Some("1980s"),
+        "1990s" => Some("1990s"),
+        "2000s" => Some("2000s"),
+        "2010s" => Some("2010s"),
+        _ => None,
+    }
+}
+
+fn format_sample_type_clean(sample_type: &str) -> Option<&'static str> {
+    match sample_type {
+        "drums" => Some("drum break"),
+        "melody" => Some("instrumental melody"),
+        "bass" => Some("bassline"),
+        "vocals" => Some("acapella vocals"),
+        "fx" => Some("sound effects"),
+        "full_track" => Some("full album"),
+        _ => None,
+    }
+}
+
 pub fn build_search_query(filters: &SearchFilters, dict: &QueryDictionary) -> BuiltQuery {
     let mut rng = rand::rng();
-    let modifier = dict
-        .crate_modifiers
-        .choose(&mut rng)
-        .map(|s| s.as_str())
-        .unwrap_or("vinyl rip");
 
-    let year_info = random_year_from_decade(&filters.decade);
+    let region_word = format_region_clean(&filters.region);
+    let decade_word = format_decade_clean(&filters.decade);
+    let genre_word = if filters.genre != "all" {
+        Some(filters.genre.as_str())
+    } else {
+        None
+    };
+    let type_word = format_sample_type_clean(&filters.sample_type);
 
+    // 1. Vocal Mode
+    if filters.mode == DigMode::OnlyVocal {
+        if filters.duration == "shorts" {
+            let base = dict
+                .vocal_shorts_queries
+                .choose(&mut rng)
+                .cloned()
+                .unwrap_or_else(|| "acapella vocal hook #shorts".to_string());
+            return BuiltQuery {
+                query: base,
+                query_tag: "Vocal Shorts".to_string(),
+            };
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(r) = region_word {
+            parts.push(r.to_string());
+        }
+        if let Some(g) = genre_word {
+            parts.push(g.to_string());
+        }
+        if let Some(d) = decade_word {
+            parts.push(d.to_string());
+        }
+        let base = dict
+            .vocal_full_queries
+            .choose(&mut rng)
+            .cloned()
+            .unwrap_or_else(|| "acapella vocals".to_string());
+        parts.push(base);
+        return BuiltQuery {
+            query: parts.join(" "),
+            query_tag: "Vocal Dig".to_string(),
+        };
+    }
+
+    // 2. Explicit Filter Mode (e.g., Region: France + Decade: 1970s -> "french music 1970s")
+    let has_specific_filter =
+        region_word.is_some() || decade_word.is_some() || genre_word.is_some() || type_word.is_some();
+
+    if has_specific_filter {
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some(r) = region_word {
+            parts.push(r.to_string());
+        }
+        if let Some(g) = genre_word {
+            parts.push(g.to_string());
+        }
+        if let Some(t) = type_word {
+            parts.push(t.to_string());
+        } else if genre_word.is_none() {
+            let anchor = if filters.mode == DigMode::OnlyInstrumental {
+                "instrumental music"
+            } else {
+                ["music", "vinyl", "records"].choose(&mut rng).unwrap_or(&"music")
+            };
+            parts.push(anchor.to_string());
+        }
+        if let Some(d) = decade_word {
+            parts.push(d.to_string());
+        }
+
+        if filters.mode == DigMode::OnlyInstrumental && type_word.is_none() && genre_word.is_some() {
+            parts.push("instrumental".to_string());
+        }
+
+        let tag = match filters.mode {
+            DigMode::WorldAdventure => "World Clean",
+            DigMode::OnlyInstrumental => "Instrumental",
+            _ => "Filtered Dig",
+        };
+
+        return BuiltQuery {
+            query: parts.join(" "),
+            query_tag: tag.to_string(),
+        };
+    }
+
+    // 3. Pure Random Mode (all filters set to "all")
     match filters.mode {
         DigMode::WorldAdventure => {
-            let fallback = WorldStyleEntry {
-                query: "Ethiopian jazz".into(),
-                label: "Ethiopia".into(),
+            let fallback_style = WorldStyleEntry {
+                query: "french music 1970s".to_string(),
+                label: "World".to_string(),
             };
-            let entry = dict.world_styles.choose(&mut rng).unwrap_or(&fallback);
-
-            match year_info {
-                Some((year, dec_label)) => BuiltQuery {
-                    query: format!("{} {} {}", entry.query, year, modifier),
-                    query_tag: format!("{} • {}", dec_label, entry.label),
-                },
-                None => BuiltQuery {
-                    query: format!("{} {}", entry.query, modifier),
-                    query_tag: format!("All Eras • {}", entry.label),
-                },
-            }
-        }
-
-        DigMode::OnlyVocal => {
-         let is_shorts = filters.duration == "shorts";
-         if is_shorts {
-             return BuiltQuery {
-                 query: "sample this vocal #shorts".to_string(),
-                 query_tag: "Vocal Shorts • YT".to_string(),
-             };
-         }
-
-         let base = dict
-             .vocal_full_queries
-             .choose(&mut rng)
-             .map(|s| s.as_str())
-             .unwrap_or("isolated vocal track");
-
-         match year_info {
-             Some((year, dec_label)) => BuiltQuery {
-                 query: format!("{} {}", base, year),
-                 query_tag: format!("{} • Vocal", dec_label),
-             },
-             None => BuiltQuery {
-                 query: base.to_string(),
-                 query_tag: "All Eras • Vocal".to_string(),
-             },
-         }
-     }
-
-        DigMode::OnlyInstrumental => {
-            let target_key = filters.genre.to_lowercase();
-            let genre_entry = dict
-                .genres
-                .iter()
-                .find(|g| g.key.to_lowercase() == target_key)
-                .or_else(|| dict.genres.first());
-
-            let (genre_term, genre_label) = match genre_entry {
-                Some(g) => (g.keywords.as_str(), g.label.as_str()),
-                None => ("groove fusion", "Any Genre"),
-            };
-
-            let inst_word = dict
-                .instrumental_suffixes
-                .choose(&mut rng)
-                .map(|s| s.as_str())
-                .unwrap_or("instrumental");
-
-            match year_info {
-                Some((year, dec_label)) => BuiltQuery {
-                    query: format!("{} {} {} {}", genre_term, inst_word, year, modifier),
-                    query_tag: format!("{} • {} Inst", dec_label, genre_label),
-                },
-                None => BuiltQuery {
-                    query: format!("{} {} {}", genre_term, inst_word, modifier),
-                    query_tag: format!("{} • Instrumental", genre_label),
-                },
-            }
-        }
-
-        DigMode::General => {
-            let target_reg = filters.region.to_lowercase();
-            let reg_entry = dict
-                .regions
-                .iter()
-                .find(|r| r.key.to_lowercase() == target_reg)
-                .or_else(|| dict.regions.first());
-
-            let (reg_terms, reg_label) = match reg_entry {
-                Some(r) => (r.keywords.as_str(), r.label.as_str()),
-                None => ("rare groove jazz soul", "Global"),
-            };
-
-            let type_term = match filters.sample_type.as_str() {
-                "vocal" => "vocal acapella",
-                "instrumental" => "instrumental",
-                "track" => "full track",
-                _ => "",
-            };
-
-            let mut parts = vec![reg_terms.to_string()];
-            if !type_term.is_empty() {
-                parts.push(type_term.to_string());
-            }
-            if let Some((year, _)) = &year_info {
-                parts.push(year.to_string());
-            }
-            parts.push(modifier.to_string());
-
-            let era_label = year_info
-                .map(|(_, d)| d)
-                .unwrap_or_else(|| "All Eras".to_string());
-
+            let entry = dict.world_styles.choose(&mut rng).unwrap_or(&fallback_style);
             BuiltQuery {
-                query: parts.join(" "),
-                query_tag: format!("{} • {}", era_label, reg_label),
+                query: entry.query.clone(),
+                query_tag: entry.label.clone(),
+            }
+        }
+        DigMode::OnlyInstrumental => {
+            let base = dict
+                .general_queries
+                .choose(&mut rng)
+                .cloned()
+                .unwrap_or_else(|| "library music".to_string());
+            BuiltQuery {
+                query: format!("{base} instrumental"),
+                query_tag: "Instrumental".to_string(),
+            }
+        }
+        _ => {
+            let base = dict
+                .general_queries
+                .choose(&mut rng)
+                .cloned()
+                .unwrap_or_else(|| "rare groove".to_string());
+
+            if rand::random::<f32>() < 0.3 {
+                let modifier = dict
+                    .crate_modifiers
+                    .choose(&mut rng)
+                    .cloned()
+                    .unwrap_or_else(|| "vinyl".to_string());
+                BuiltQuery {
+                    query: format!("{base} {modifier}"),
+                    query_tag: "Deep Crate".to_string(),
+                }
+            } else {
+                BuiltQuery {
+                    query: base,
+                    query_tag: "Crate Dig".to_string(),
+                }
             }
         }
     }
 }
+
+
 #[tauri::command]
 pub fn get_query_dictionary(app: AppHandle) -> QueryDictionary {
     load_or_init_dictionary(&app)
