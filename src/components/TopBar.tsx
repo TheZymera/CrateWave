@@ -1,4 +1,4 @@
-import { FolderOpen, Settings } from "lucide-react";
+import { Disc3, FolderOpen, Settings } from "lucide-react";
 
 export type WindowSizePreset = "small" | "medium" | "big";
 
@@ -6,6 +6,7 @@ interface TopBarProps {
   queryUsed: string;
   queryTag: string;
   savedCount: number;
+  settingsOpen: boolean;
   onOpenSamplesFolder: () => void;
   onOpenSettings: () => void;
 }
@@ -14,6 +15,7 @@ export function TopBar({
   queryUsed,
   queryTag,
   savedCount,
+  settingsOpen,
   onOpenSamplesFolder,
   onOpenSettings,
 }: TopBarProps) {
@@ -40,7 +42,7 @@ export function TopBar({
         </div>
       </div>
 
-      {/* Right: 3D My Samples & Settings Switches */}
+      {/* Right: 3D My Samples & Settings / Return-to-Turntable Switch */}
       <div className="flex items-center gap-2.5 pointer-events-auto">
         <button
           onClick={onOpenSamplesFolder}
@@ -56,10 +58,25 @@ export function TopBar({
 
         <button
           onClick={onOpenSettings}
-          title="Settings & Search Word Bubbles"
+          title={settingsOpen ? "Return to Turntable View" : "Front-Panel VFD Settings"}
           className="hw-key p-1.5 cursor-pointer"
         >
-          <Settings className="w-3.5 h-3.5 text-[#262420]" />
+          {settingsOpen ? (
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="w-3.5 h-3.5 text-[#262420]"
+            >
+              <circle cx="12" cy="12" r="9.5" />
+              <circle cx="12" cy="12" r="6.2" strokeOpacity="0.45" strokeDasharray="3 2" />
+              <circle cx="12" cy="12" r="3.2" />
+              <circle cx="12" cy="12" r="1" fill="currentColor" />
+            </svg>
+          ) : (
+            <Settings className="w-3.5 h-3.5 text-[#262420]" />
+          )}
         </button>
       </div>
     </header>

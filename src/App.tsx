@@ -3,10 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { TopBar, type WindowSizePreset } from "./components/TopBar";
 import { TurntableStage } from "./components/TurntableStage";
-import { WaveformChopper } from "./components/WaveformChopper";
-import { SettingsModal } from "./components/SettingsModal";
 import { useCrateStore } from "./store/useCrateStore";
 import { TurntableAudioDeck } from "./utils/tapeAudioFx";
+
 import type {
   ActiveSample,
   SampleCandidate,
@@ -330,12 +329,13 @@ function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#15171c] text-[#eae5dc]">
-      <TopBar
+    <TopBar
         queryUsed={queryUsed}
         queryTag={queryTag}
         savedCount={savedCount}
+        settingsOpen={settingsOpen}
         onOpenSamplesFolder={handleOpenSamples}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => setSettingsOpen((prev) => !prev)}
       />
 
       <TurntableStage
@@ -348,31 +348,22 @@ function App() {
         vuLevel={vuLevel}
         masterVolume={masterVolume}
         exportFormat={exportFormat}
+        settingsOpen={settingsOpen}
+        trimOpen={trimModalOpen}
+        windowPreset={windowPreset}
+        onChangeWindowPreset={handleChangeWindowPreset}
+        onCloseSettings={() => setSettingsOpen(false)}
         onChangeVolume={setMasterVolume}
         onToggleFormat={setExportFormat}
         onRerollCenter={handleRerollCenter}
         onPlay={handlePlay}
         onStop={handleStop}
         onOpenTrim={handleOpenTrim}
-      />
-
-      {trimModalOpen && activeSample && (
-        <WaveformChopper
-          sample={activeSample}
-          exportFormat={exportFormat}
-          onUpdateSample={(updated) => {
-            setActiveSample(updated);
-            syncSamplesCountFromDisk();
-          }}
-          onClose={() => setTrimModalOpen(false)}
-        />
-      )}
-
-      <SettingsModal
-        isOpen={settingsOpen}
-        windowPreset={windowPreset}
-        onChangeWindowPreset={handleChangeWindowPreset}
-        onClose={() => setSettingsOpen(false)}
+        onCloseTrim={() => setTrimModalOpen(false)}
+        onUpdateSample={(updated) => {
+          setActiveSample(updated);
+          syncSamplesCountFromDisk();
+        }}
       />
     </div>
   );
