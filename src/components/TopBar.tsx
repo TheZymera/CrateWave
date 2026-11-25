@@ -23,12 +23,11 @@ export function TopBar({
     <header className="relative z-20 h-11 px-4 flex items-center justify-between border-b border-[#c9a36b]/20 bg-gradient-to-b from-[#1f1813]/90 to-[#1f1813]/45 backdrop-blur-[2px] shrink-0 pointer-events-none">
       {/* Left: Brand & Recessed LCD Readout */}
       <div className="flex items-center gap-3 pointer-events-auto">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-[#ffb347] shadow-[0_0_8px_#ffb347]" />
-          <span className="font-chassis font-extrabold text-sm tracking-[0.24em] text-[#f0e2c8]">
-            CRATEWAVE
-          </span>
-        </div>
+       <div className="flex items-center gap-2.5 select-none">
+  <span className="font-bold tracking-[0.22em] text-lg text-[#eae5dc] select-none">
+  CRATEWAVE
+</span>
+</div>
 
         <div className="recessed-lcd rounded px-3 py-1 flex items-center gap-2.5 max-w-[300px]">
           <span className="font-mono-tech text-[11px] text-[#ffcf70] truncate drop-shadow-[0_0_6px_rgba(255,185,70,0.45)]">

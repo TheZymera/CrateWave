@@ -1,3 +1,4 @@
+use crate::discovery::extra_sources::shared_http_client;
 use crate::discovery::{DigMode, SampleCandidate, SearchFilters};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -42,7 +43,6 @@ fn parse_ia_runtime(val: Option<serde_json::Value>) -> Option<u32> {
         _ => return None,
     };
 
-    // Parses "MM:SS" or "HH:MM:SS" or raw seconds
     let parts: Vec<&str> = raw.split(':').collect();
     match parts.len() {
         1 => parts[0].parse::<f64>().ok().map(|s| s.round() as u32),
@@ -62,7 +62,7 @@ fn parse_ia_runtime(val: Option<serde_json::Value>) -> Option<u32> {
 }
 
 /// Extracts clean, high-signal search keywords (keeps exact topic words, drops filler/years).
-fn extract_core_keywords(query: &str) -> Vec<String> {
+pub fn extract_core_keywords(query: &str) -> Vec<String> {
     let stop_words = [
         "vinyl", "rip", "rare", "groove", "full", "album", "track", "obscure",
         "record", "original", "pressing", "deep", "cut", "studio", "session",
@@ -78,14 +78,13 @@ fn extract_core_keywords(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Searches Internet Archive music collections strictly matching the user's query (excludes radio/podcasts).
+/// Searches Internet Archive music collections with page 1-2 weighting so niche queries always hit.
 pub async fn search_internet_archive(
     query: &str,
     query_tag: &str,
     filters: &SearchFilters,
     seen_ids: &HashSet<String>,
 ) -> Result<Vec<SampleCandidate>, String> {
-    // Vocal shorts (<60s) are YouTube-only
     if filters.mode == DigMode::OnlyVocal && filters.duration == "shorts" {
         return Ok(Vec::new());
     }
@@ -95,21 +94,18 @@ pub async fn search_internet_archive(
         return Ok(Vec::new());
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(7))
-        .user_agent("CrateWave/1.0")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let page_str = if rand::random::<f32>() < 0.75 { "1" } else { "2" };
+    let client = shared_http_client();
 
-    // Require ALL core keywords (AND) + restrict to music collections + exclude radio/FM/podcasts
-    let terms_clause = keywords.join(" AND ");
+    let terms_clause = keywords.join(" OR ");
     let q_string = format!(
-        "({}) AND mediatype:(audio) AND collection:(78rpm OR audio_music OR netlabels OR etree) AND -title:(FM) AND -title:(Radio) AND -title:(Podcast) AND -title:(Show)",
+        "({}) AND mediatype:(audio) AND collection:(78rpm OR audio_music OR netlabels OR etree OR opensource_audio) AND -title:(FM) AND -title:(Radio) AND -title:(Podcast) AND -title:(Show) AND -title:(Interview) AND -title:(Audiobook)",
         terms_clause
     );
 
     let resp = client
         .get("https://archive.org/advancedsearch.php")
+        .timeout(Duration::from_millis(8000))
         .query(&[
             ("q", q_string.as_str()),
             ("fl[]", "identifier"),
@@ -117,8 +113,8 @@ pub async fn search_internet_archive(
             ("fl[]", "creator"),
             ("fl[]", "date"),
             ("fl[]", "runtime"),
-            ("rows", "20"),
-            ("page", "1"),
+            ("rows", "25"),
+            ("page", page_str),
             ("output", "json"),
         ])
         .send()
@@ -126,12 +122,13 @@ pub async fn search_internet_archive(
         .map_err(|e| format!("IA request error: {e}"))?;
 
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return Err(format!("IA HTTP {}", resp.status()));
     }
 
-    let Ok(parsed) = resp.json::<IaSearchResponse>().await else {
-        return Ok(Vec::new());
-    };
+    let parsed = resp
+        .json::<IaSearchResponse>()
+        .await
+        .map_err(|e| format!("IA JSON error: {e}"))?;
 
     let mut results = Vec::new();
     for doc in parsed.response.docs {
@@ -141,21 +138,11 @@ pub async fn search_internet_archive(
         }
 
         let title = doc.title.unwrap_or_else(|| doc.identifier.clone());
-        let lower_title = title.to_lowercase();
-        if lower_title.contains("radio")
-            || lower_title.contains(" fm")
-            || lower_title.contains("podcast")
-            || lower_title.contains("episode")
-        {
-            continue;
-        }
-
         let duration_sec = parse_ia_runtime(doc.runtime).unwrap_or(0);
-        // Filter out multi-hour mixes/broadcasts (> 20 mins)
-        if duration_sec > 1200 {
+
+        if filters.duration != "long" && duration_sec > 720 {
             continue;
         }
-
         if filters.duration == "shorts" && duration_sec > 65 {
             continue;
         }
@@ -207,7 +194,7 @@ struct CommonsSearchItem {
     size: Option<u64>,
 }
 
-/// Searches Wikimedia Commons (`filetype:audio`) matching exact core keywords.
+/// Searches Wikimedia Commons (`filetype:audio`) with spoken-word rejection.
 pub async fn search_wikimedia_commons(
     query: &str,
     query_tag: &str,
@@ -223,28 +210,29 @@ pub async fn search_wikimedia_commons(
         return Ok(Vec::new());
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(4))
-        .user_agent("CrateWave/1.0")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
+    let offset_str = (rand::random::<u32>() % 12).to_string();
+    let client = shared_http_client();
     let srsearch = format!("filetype:audio {}", keywords.join(" "));
-    let Ok(resp) = client
+
+    let resp = client
         .get("https://commons.wikimedia.org/w/api.php")
+        .timeout(Duration::from_millis(4500))
         .query(&[
             ("action", "query"),
             ("list", "search"),
             ("srsearch", srsearch.as_str()),
             ("srnamespace", "6"),
             ("srlimit", "15"),
+            ("sroffset", offset_str.as_str()),
             ("format", "json"),
         ])
         .send()
         .await
-    else {
-        return Ok(Vec::new());
-    };
+        .map_err(|e| format!("WC request error: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("WC HTTP {}", resp.status()));
+    }
 
     let items = resp
         .json::<CommonsResponse>()
@@ -256,7 +244,20 @@ pub async fn search_wikimedia_commons(
 
     let mut results = Vec::new();
     for item in items {
-        if item.size.unwrap_or(50_000) < 25_000 {
+        if item.size.unwrap_or(0) < 180_000 {
+            continue;
+        }
+
+        let lower_raw = item.title.to_lowercase();
+        if lower_raw.contains("pronunciation")
+            || lower_raw.starts_with("file:en-")
+            || lower_raw.starts_with("file:de-")
+            || lower_raw.starts_with("file:fr-")
+            || lower_raw.starts_with("file:ru-")
+            || lower_raw.contains("spoken")
+            || lower_raw.contains("wikipedia")
+            || lower_raw.contains("librivox")
+        {
             continue;
         }
 
@@ -281,7 +282,7 @@ pub async fn search_wikimedia_commons(
             source: "wikimedia".to_string(),
             title: display_title,
             channel: "Wikimedia Commons".to_string(),
-            duration_sec: 60,
+            duration_sec: 90,
             thumbnail_url: String::new(),
             source_url,
             query_tag: format!("{} • WC", query_tag),

@@ -58,6 +58,36 @@ pub fn mark_ids_seen(app: &AppHandle, new_ids: &[String]) -> Result<usize, Strin
     Ok(seen.len())
 }
 
+fn quarantined_ids_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app_data_dir: {e}"))?;
+    fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("Failed to create app_data_dir: {e}"))?;
+    Ok(data_dir.join("quarantined_ids.json"))
+}
+
+pub fn load_quarantined_ids(app: &AppHandle) -> HashSet<String> {
+    let Ok(path) = quarantined_ids_path(app) else {
+        return HashSet::new();
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<HashSet<String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn quarantine_id(app: &AppHandle, bad_id: &str) -> Result<(), String> {
+    let path = quarantined_ids_path(app)?;
+    let mut set = load_quarantined_ids(app);
+    set.insert(bad_id.to_string());
+    let json = serde_json::to_string_pretty(&set)
+        .map_err(|e| format!("Failed to serialize quarantined_ids: {e}"))?;
+    fs::write(path, json).map_err(|e| format!("Failed to write quarantined_ids.json: {e}"))?;
+    Ok(())
+}
+
 /// Strips Windows/POSIX illegal filename characters and collapses whitespace.
 pub fn sanitize_filename(raw: &str) -> String {
     let cleaned: String = raw

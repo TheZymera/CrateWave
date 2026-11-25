@@ -30,6 +30,7 @@ dirs = "7.0.0"
 reqwest = { version = "0.13.5", features = ["json", "query", "stream"] }
 rand = "0.10.4"
 futures-util = "0.3.34"
+chrono = "0.4"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

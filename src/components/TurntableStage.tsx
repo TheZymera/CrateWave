@@ -11,6 +11,7 @@ import type {
   ExportFormat,
   SampleCandidate,
 } from "../types/crate";
+import { logActivity, logError, logTask } from "../utils/logger"
 
 interface TurntableStageProps {
   currentCandidate: SampleCandidate | null;
@@ -235,6 +236,10 @@ export function TurntableStage({
   };
 
   const handleToggleAudition = async () => {
+    logActivity(isAuditioning ? "TRIM_AUDITION_STOP" : "TRIM_AUDITION_START", {
+      trimStart: trimRange[0],
+      trimEnd: trimRange[1],
+    });
     if (isAuditioning) {
       stopAudition();
       return;
@@ -297,6 +302,13 @@ export function TurntableStage({
     const startSec = trimRange[0] * dur;
     const endSec = Math.max(startSec + 0.1, trimRange[1] * dur);
 
+    logTask("TRIM_EXPORT", "Exporting slice", {
+      title: activeSample.title,
+      startSec,
+      endSec,
+      format: exportFormat,
+    });
+    
     try {
       const exportedPath = await invoke<string>("export_trimmed_sample", {
         masterWavPath: activeSample.masterWavPath,
@@ -316,6 +328,7 @@ export function TurntableStage({
         exportedPath,
       });
     } catch (err) {
+      logError("TRIM_EXPORT_FAIL", String(err));
       console.error("Trim failed:", err);
       setTrimError(String(err));
     } finally {
@@ -323,8 +336,11 @@ export function TurntableStage({
     }
   };
 
+  
+
   const handleDragToDaw = async () => {
     if (!dragFilePath) return;
+    logActivity("DRAG_TO_DAW", { file: dragFilePath });
     try {
       const iconPath = await invoke<string>("get_drag_icon_path");
       await startDrag({
@@ -332,6 +348,7 @@ export function TurntableStage({
         icon: iconPath,
       });
     } catch (err) {
+      logError("NATIVE_DRAG_FAIL", String(err));
       console.error("Native drag failed:", err);
     }
   };
@@ -414,6 +431,8 @@ export function TurntableStage({
           {trimError}
         </div>
       )}
+
+      
 
       {/* Bottom-Right Recessed Warm-Metal Filter Control Plate */}
       {!settingsOpen && !trimOpen && (
@@ -575,4 +594,5 @@ export function TurntableStage({
       )}
     </main>
   );
+  
 }

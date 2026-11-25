@@ -1,7 +1,7 @@
 use crate::discovery::{DigMode, SearchFilters};
 use rand::seq::IndexedRandom;
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -48,36 +48,76 @@ pub struct QueryDictionary {
 impl Default for QueryDictionary {
     fn default() -> Self {
         let world_styles = vec![
-            ("Ethiopian jazz", "Ethiopia"),
-            ("Anatolian rock", "Turkey"),
-            ("Soviet funk groove", "USSR"),
-            ("Japanese city pop", "Japan"),
-            ("Brazilian MPB funk", "Brazil"),
-            ("Peruvian chicha cumbia", "Peru"),
-            ("French library music", "France"),
-            ("Bollywood disco funk", "India"),
-            ("Italian cinema soundtrack", "Italy"),
-            ("Zamrock psychedelic", "Zambia"),
-            ("Nigerian afrobeat", "Nigeria"),
-            ("Arabic belly dance groove", "Middle East"),
-            ("Korean psych rock", "South Korea"),
-            ("Colombian salsa dura", "Colombia"),
-            ("Thai molam funk", "Thailand"),
-            ("Hungarian jazz rock", "Hungary"),
-            ("Polish jazz vinyl", "Poland"),
-            ("Egyptian shaabi vintage", "Egypt"),
-            ("Lebanese tarab vinyl", "Lebanon"),
-            ("Cuban son montuno", "Cuba"),
-            ("Jamaican dub instrumental", "Jamaica"),
-            ("German krautrock", "Germany"),
-            ("Swedish folk psych", "Sweden"),
-            ("Indonesian pop kreatif", "Indonesia"),
-            ("Iranian funk 70s", "Iran"),
-            ("Moroccan gnawa groove", "Morocco"),
-            ("Argentine rock nacional", "Argentina"),
-            ("Greek laiko bouzouki", "Greece"),
-            ("Senegalese mbalax", "Senegal"),
-            ("Romanian jazz fusion", "Romania"),
+            // Europe (balanced share when Region = All; dedicated pool when Region = Europe)
+            ("chanson française", "France"),
+            ("yé-yé française", "Paris Yé-Yé"),
+            ("musique de film française", "Paris Cinema"),
+            ("french library groove", "Paris Library"),
+            ("french touch house", "Paris House"),
+            ("canzone italiana", "Italy"),
+            ("colonna sonora italiana", "Cinecittà"),
+            ("italo disco synth", "Milan Disco"),
+            ("yé-yé español", "Spain"),
+            ("rumba flamenca", "Andalucía"),
+            ("fado português", "Lisbon"),
+            ("german krautrock", "Berlin"),
+            ("german library jazz", "Munich Library"),
+            ("swedish jazz", "Stockholm"),
+            ("polish jazz vinyl", "Warsaw"),
+            ("hungarian jazz rock", "Budapest"),
+            ("czech jazz funk", "Prague"),
+            ("romanian jazz fusion", "Bucharest"),
+            ("greek laiko bouzouki", "Athens"),
+            ("uk garage 2step", "London UKG"),
+            // CIS / Eurasia
+            ("soviet VIA", "USSR VIA"),
+            ("soviet cinema soundtrack", "Mosfilm"),
+            ("soviet estrada jazz", "Moscow Jazz"),
+            ("russian post punk", "CIS Wave"),
+            // Asia
+            ("kayokyoku", "Tokyo Vintage"),
+            ("japanese city pop", "Tokyo City Pop"),
+            ("japanese jazz fusion", "Tokyo Jazz"),
+            ("shibuya kei groove", "Shibuya-Kei"),
+            ("korean psych rock", "Seoul Psych"),
+            ("korean indie soul", "Seoul Soul"),
+            ("thai molam funk", "Bangkok"),
+            ("indonesian pop kreatif", "Jakarta"),
+            ("vietnamese bolero", "Saigon"),
+            ("bollywood disco funk", "Mumbai"),
+            ("indian classical sitar", "India Sitar"),
+            // Latin America & Caribbean
+            ("bossa nova vocal", "Rio Bossa"),
+            ("mpb brasileira", "Brazil MPB"),
+            ("samba soul groove", "Brazil Soul"),
+            ("baile funk groove", "Rio Baile"),
+            ("cumbia peruana chicha", "Lima Chicha"),
+            ("colombian salsa dura", "Colombia"),
+            ("afro cuban son montuno", "Havana"),
+            ("bolero mexicano", "Mexico"),
+            ("argentine rock nacional", "Buenos Aires"),
+            ("jamaican roots reggae", "Kingston"),
+            ("jamaican dub instrumental", "Jamaica Dub"),
+            ("rocksteady ska", "Jamaica Ska"),
+            // Africa
+            ("ethio jazz", "Ethiopia"),
+            ("nigerian afrobeat", "Lagos"),
+            ("alte afro fusion", "Lagos Alté"),
+            ("ghana highlife", "Accra"),
+            ("zamrock psychedelic", "Zambia"),
+            ("mali desert blues", "Mali"),
+            ("congo soukous rumba", "Kinshasa"),
+            ("south african amapiano", "Johannesburg"),
+            ("senegalese mbalax", "Dakar"),
+            // Middle East & North Africa
+            ("anatolian psych rock", "Istanbul"),
+            ("turkish psychedelic funk", "Turkey"),
+            ("habibi funk", "Beirut"),
+            ("lebanese tarab", "Lebanon"),
+            ("egyptian shaabi", "Cairo"),
+            ("persian funk", "Tehran"),
+            ("moroccan gnawa", "Morocco"),
+            ("algerian rai", "Algeria"),
         ]
         .into_iter()
         .map(|(q, l)| WorldStyleEntry {
@@ -90,8 +130,8 @@ impl Default for QueryDictionary {
             ("all", "rare groove jazz soul", "Global"),
             ("japan", "Japanese jazz soul funk", "Japan"),
             ("brazil", "Brazilian MPB samba bossa", "Brazil"),
-            ("cis", "Soviet VIA jazz funk", "CIS / Russia"),
-            ("europe", "European library jazz funk", "Europe"),
+            ("cis", "Soviet VIA cinema jazz", "CIS / Russia"),
+            ("europe", "chanson française canzone italiana library", "Europe"),
             ("mena", "Arabic Turkish Persian groove", "Middle East"),
             ("africa", "Afrobeat Highlife Zamrock", "Africa"),
             ("latin", "Latin cumbia salsa boogaloo", "Latin America"),
@@ -127,23 +167,73 @@ impl Default for QueryDictionary {
         Self {
             world_styles,
             general_queries: vec![
-                "rare groove".to_string(),
-                "obscure soul".to_string(),
-                "private press jazz".to_string(),
-                "library music".to_string(),
-                "psychedelic funk".to_string(),
-                "vintage bossa nova".to_string(),
-                "analog synth".to_string(),
-                "underground hip hop instrumental".to_string(),
+                // Era-neutral queries spanning 1950s through 2020s
+                "rare groove".into(),
+                "obscure soul".into(),
+                "private press jazz".into(),
+                "library music".into(),
+                "psychedelic funk".into(),
+                "bossa nova groove".into(),
+                "analog synth".into(),
+                "underground hip hop instrumental".into(),
+                "soul funk groove".into(),
+                "classic motown soul".into(),
+                "sweet soul ballad".into(),
+                "neo soul rhodes".into(),
+                "deep funk breakbeat".into(),
+                "boogie disco funk".into(),
+                "jazz funk fusion".into(),
+                "modal jazz quartet".into(),
+                "hard bop jazz".into(),
+                "cool jazz piano".into(),
+                "smooth jazz saxophone".into(),
+                "spiritual jazz flute".into(),
+                "acid jazz groove".into(),
+                "nu jazz broken beat".into(),
+                "jazz trio upright bass".into(),
+                "rhodes electric piano".into(),
+                "hammond organ groove".into(),
+                "clavinet funk groove".into(),
+                "boom bap jazz beat".into(),
+                "hip hop instrumental".into(),
+                "trip hop downtempo".into(),
+                "gospel soul choir".into(),
+                "chicago blues guitar".into(),
+                "southern soul horns".into(),
+                "philly soul strings".into(),
+                "film soundtrack score".into(),
+                "noir jazz soundtrack".into(),
+                "orchestral cinema strings".into(),
+                "spy theme groove".into(),
+                "synthwave boogie".into(),
+                "french house groove".into(),
+                "deep house chords".into(),
+                "detroit techno analog".into(),
+                "ambient modular synth".into(),
+                "warm tape ambient".into(),
+                "dream pop shoegaze".into(),
+                "indie soul guitar".into(),
+                "post punk bassline".into(),
+                "disco strings groove".into(),
+                "latin boogaloo funk".into(),
+                "salsa jazz percussion".into(),
+                "dub reggae bassline".into(),
+                "roots reggae groove".into(),
+                "afrobeat horn section".into(),
+                "spanish acoustic guitar".into(),
+                "drum break groove".into(),
+                "psychedelic rock guitar".into(),
+                "rnb slow jam".into(),
+                "uk soul groove".into(),
+                "chanson française".into(),
+                "canzone italiana".into(),
             ],
             crate_modifiers: vec![
-                "vinyl rip".into(),
-                "rare groove".into(),
-                "full album track".into(),
-                "obscure record".into(),
-                "original pressing".into(),
-                "deep cut".into(),
-                "studio session".into(),
+                "vinyl".into(),
+                "groove".into(),
+                "session".into(),
+                "classic".into(),
+                "vintage".into(),
             ],
             vocal_shorts_queries: vec![
                 "sample this vocal".into(),
@@ -153,22 +243,48 @@ impl Default for QueryDictionary {
                 "gospel vocal solo".into(),
                 "choir harmony isolated".into(),
                 "opera soprano solo raw".into(),
+                "rnb vocal riff acapella".into(),
+                "jazz scat vocal solo".into(),
+                "reggae vocal chant raw".into(),
+                "house diva vocal acapella".into(),
+                "blues singer raw acapella".into(),
+                "female soul adlib vocal".into(),
+                "folk singing solo raw".into(),
             ],
             vocal_full_queries: vec![
                 "acapella studio vocals".into(),
                 "isolated vocal track".into(),
                 "vocal stem only".into(),
-                "vintage spoken word vinyl".into(),
+                "soul acapella vocal".into(),
+                "soul singer ballad".into(),
+                "gospel choir harmony".into(),
+                "rnb acapella vocals".into(),
+                "jazz vocal ballad".into(),
+                "female jazz vocalist".into(),
+                "house acapella vocals".into(),
+                "chanson française vocal".into(),
+                "canzone italiana vocal".into(),
+                "brazilian bossa vocal".into(),
+                "doo wop vocal harmony".into(),
                 "traditional folk singing unaccompanied".into(),
                 "gregorian chant choir".into(),
-                "soul acapella vocal".into(),
+                "celtic vocal folk".into(),
+                "african vocal choir".into(),
+                "blues vocal acoustic".into(),
             ],
             instrumental_suffixes: vec![
                 "instrumental".into(),
                 "no vocals".into(),
                 "drum break".into(),
-                "synth solo".into(),
                 "library music".into(),
+                "jazz trio".into(),
+                "funk groove".into(),
+                "piano solo".into(),
+                "guitar instrumental".into(),
+                "bass groove".into(),
+                "horn section".into(),
+                "rhodes jam".into(),
+                "dub version".into(),
             ],
             regions,
             genres,
@@ -186,25 +302,68 @@ pub fn resolve_queries_json_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir.join("queries.json"))
 }
 
-/// Loads `queries.json` from app_data_dir, creating it with defaults if missing or invalid.
+fn merge_unique_strings(target: &mut Vec<String>, defaults: Vec<String>) -> bool {
+    let mut existing: HashSet<String> = target.iter().map(|s| s.to_lowercase()).collect();
+    let mut changed = false;
+    for item in defaults {
+        if existing.insert(item.to_lowercase()) {
+            target.push(item);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn merge_unique_world_styles(
+    target: &mut Vec<WorldStyleEntry>,
+    defaults: Vec<WorldStyleEntry>,
+) -> bool {
+    let mut existing: HashSet<String> = target.iter().map(|e| e.query.to_lowercase()).collect();
+    let mut changed = false;
+    for item in defaults {
+        if existing.insert(item.query.to_lowercase()) {
+            target.push(item);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Loads `queries.json` from app_data_dir, auto-merging new built-in queries while preserving custom edits.
 pub fn load_or_init_dictionary(app: &AppHandle) -> QueryDictionary {
     let Ok(path) = resolve_queries_json_path(app) else {
         return QueryDictionary::default();
     };
 
+    let defaults = QueryDictionary::default();
     if path.exists() {
         if let Ok(raw) = fs::read_to_string(&path) {
-            if let Ok(dict) = serde_json::from_str::<QueryDictionary>(&raw) {
+            if let Ok(mut dict) = serde_json::from_str::<QueryDictionary>(&raw) {
+                let mut changed = false;
+                changed |= merge_unique_strings(&mut dict.general_queries, defaults.general_queries);
+                changed |= merge_unique_world_styles(&mut dict.world_styles, defaults.world_styles);
+                changed |=
+                    merge_unique_strings(&mut dict.vocal_shorts_queries, defaults.vocal_shorts_queries);
+                changed |=
+                    merge_unique_strings(&mut dict.vocal_full_queries, defaults.vocal_full_queries);
+                changed |= merge_unique_strings(
+                    &mut dict.instrumental_suffixes,
+                    defaults.instrumental_suffixes,
+                );
+                if changed {
+                    if let Ok(json) = serde_json::to_string_pretty(&dict) {
+                        let _ = fs::write(&path, json);
+                    }
+                }
                 return dict;
             }
         }
     }
 
-    let default_dict = QueryDictionary::default();
-    if let Ok(json) = serde_json::to_string_pretty(&default_dict) {
+    if let Ok(json) = serde_json::to_string_pretty(&defaults) {
         let _ = fs::write(&path, json);
     }
-    default_dict
+    defaults
 }
 
 #[tauri::command]
@@ -214,40 +373,66 @@ pub fn get_queries_file_path(app: AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
-fn random_year_from_decade(decade: &str) -> Option<(u32, String)> {
-    let mut rng = rand::rng();
-    let start_year = match decade {
-        "1950s" => 1950,
-        "1960s" => 1960,
-        "1970s" => 1970,
-        "1980s" => 1980,
-        "1990s" => 1990,
-        "2000s" => 2000,
-        "2010s" => 2010,
-        "2020s" => 2020,
-        _ => return None,
-    };
-    let max_offset = if start_year == 2020 { 6 } else { 9 };
-    let year = start_year + rng.random_range(0..=max_offset);
-    Some((year, decade.to_string()))
+fn random_era_year(decade: &str) -> u32 {
+    let r = rand::random::<u32>();
+    match decade {
+        "1950s" => 1950 + (r % 10),
+        "1960s" => 1960 + (r % 10),
+        "1970s" => 1970 + (r % 10),
+        "1980s" => 1980 + (r % 10),
+        "1990s" => 1990 + (r % 10),
+        "2000s" => 2000 + (r % 10),
+        "2010s" => 2010 + (r % 10),
+        "2020s" => 2020 + (r % 6),
+        _ => 1955 + (r % 71), // All eras: 1955..2025
+    }
 }
 
-fn format_region_clean(region: &str) -> Option<&'static str> {
+fn pick_region_style(region: &str) -> Option<(&'static str, &'static str)> {
+    let mut rng = rand::rng();
     match region {
-        "africa" => Some("african"),
-        "asia" => Some("asian"),
-        "europe" => Some("european"),
-        "latin_america" => Some("latin"),
-        "middle_east" => Some("middle eastern"),
-        "japan" => Some("japanese"),
-        "brazil" => Some("brazilian"),
-        "france" => Some("french"),
-        "italy" => Some("italian"),
-        "turkey" => Some("turkish"),
-        "ethiopia" => Some("ethiopian"),
-        "india" => Some("indian"),
-        "ussr" => Some("soviet"),
-        "caribbean" => Some("caribbean"),
+        "europe" => [
+            ("chanson française", "France"),
+            ("yé-yé française", "Paris Yé-Yé"),
+            ("musique de film française", "Paris Cinema"),
+            ("french library groove", "Paris Library"),
+            ("canzone italiana", "Italy"),
+            ("colonna sonora italiana", "Cinecittà"),
+            ("yé-yé español", "Spain"),
+            ("polish jazz vinyl", "Warsaw"),
+            ("swedish jazz", "Stockholm"),
+            ("german krautrock", "Berlin"),
+            ("czech jazz funk", "Prague"),
+        ]
+        .choose(&mut rng)
+        .copied(),
+        "france" => [
+            ("chanson française", "France"),
+            ("yé-yé française", "Paris Yé-Yé"),
+            ("musique de film française", "Paris Cinema"),
+            ("french library groove", "Paris Library"),
+        ]
+        .choose(&mut rng)
+        .copied(),
+        "italy" => [
+            ("canzone italiana", "Italy"),
+            ("colonna sonora italiana", "Cinecittà"),
+            ("italo disco synth", "Milan"),
+        ]
+        .choose(&mut rng)
+        .copied(),
+        "africa" => Some(("african afrobeat highlife", "Africa")),
+        "asia" => Some(("asian japanese korean groove", "Asia")),
+        "latin_america" | "latin" => Some(("latin cumbia salsa bossa", "Latin America")),
+        "middle_east" | "mena" => Some(("arabic turkish persian groove", "Middle East")),
+        "japan" => Some(("japanese jazz city pop", "Japan")),
+        "brazil" => Some(("brazilian mpb bossa samba", "Brazil")),
+        "turkey" => Some(("anatolian turkish psych", "Turkey")),
+        "ethiopia" => Some(("ethio jazz", "Ethiopia")),
+        "india" => Some(("bollywood indian groove", "India")),
+        "ussr" | "cis" => Some(("soviet VIA cinema jazz", "CIS / USSR")),
+        "caribbean" => Some(("jamaican reggae dub", "Caribbean")),
+        "usa_uk" => Some(("soul funk jazz groove", "USA / UK")),
         _ => None,
     }
 }
@@ -261,6 +446,7 @@ fn format_decade_clean(decade: &str) -> Option<&'static str> {
         "1990s" => Some("1990s"),
         "2000s" => Some("2000s"),
         "2010s" => Some("2010s"),
+        "2020s" => Some("2020s"),
         _ => None,
     }
 }
@@ -268,19 +454,33 @@ fn format_decade_clean(decade: &str) -> Option<&'static str> {
 fn format_sample_type_clean(sample_type: &str) -> Option<&'static str> {
     match sample_type {
         "drums" => Some("drum break"),
-        "melody" => Some("instrumental melody"),
-        "bass" => Some("bassline"),
+        "melody" => Some("melody instrumental"),
+        "bass" => Some("bass groove"),
         "vocals" => Some("acapella vocals"),
-        "fx" => Some("sound effects"),
-        "full_track" => Some("full album"),
+        "fx" => Some("ambient texture"),
+        "full_track" => Some("groove"),
         _ => None,
     }
+}
+
+fn title_case_label(raw: &str) -> String {
+    raw.split_whitespace()
+        .take(3)
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn build_search_query(filters: &SearchFilters, dict: &QueryDictionary) -> BuiltQuery {
     let mut rng = rand::rng();
 
-    let region_word = format_region_clean(&filters.region);
+    let region_choice = pick_region_style(&filters.region);
     let decade_word = format_decade_clean(&filters.decade);
     let genre_word = if filters.genre != "all" {
         Some(filters.genre.as_str())
@@ -303,81 +503,111 @@ pub fn build_search_query(filters: &SearchFilters, dict: &QueryDictionary) -> Bu
             };
         }
         let mut parts: Vec<String> = Vec::new();
-        if let Some(r) = region_word {
-            parts.push(r.to_string());
+        if let Some((r_kw, _)) = region_choice {
+            parts.push(r_kw.to_string());
         }
         if let Some(g) = genre_word {
             parts.push(g.to_string());
-        }
-        if let Some(d) = decade_word {
-            parts.push(d.to_string());
         }
         let base = dict
             .vocal_full_queries
             .choose(&mut rng)
             .cloned()
-            .unwrap_or_else(|| "acapella vocals".to_string());
-        parts.push(base);
+            .unwrap_or_else(|| "soul acapella vocal".to_string());
+        parts.push(base.clone());
+        if let Some(d) = decade_word {
+            parts.push(random_era_year(d).to_string());
+        }
+        let tag_prefix = region_choice.map(|(_, lbl)| lbl).unwrap_or("");
+        let tag = if tag_prefix.is_empty() {
+            title_case_label(&base)
+        } else {
+            format!("{tag_prefix} Vocal")
+        };
         return BuiltQuery {
             query: parts.join(" "),
-            query_tag: "Vocal Dig".to_string(),
+            query_tag: tag,
         };
     }
 
-    // 2. Explicit Filter Mode (e.g., Region: France + Decade: 1970s -> "french music 1970s")
-    let has_specific_filter =
-        region_word.is_some() || decade_word.is_some() || genre_word.is_some() || type_word.is_some();
+    // 2. Explicit Filter Mode (user chose Region, Decade, Genre, or Sample Type)
+    let has_specific_filter = region_choice.is_some()
+        || decade_word.is_some()
+        || genre_word.is_some()
+        || type_word.is_some();
 
     if has_specific_filter {
         let mut parts: Vec<String> = Vec::new();
 
-        if let Some(r) = region_word {
-            parts.push(r.to_string());
+        if let Some((r_kw, _)) = region_choice {
+            parts.push(r_kw.to_string());
         }
         if let Some(g) = genre_word {
             parts.push(g.to_string());
         }
         if let Some(t) = type_word {
             parts.push(t.to_string());
-        } else if genre_word.is_none() {
+        } else if genre_word.is_none() && region_choice.is_none() {
             let anchor = if filters.mode == DigMode::OnlyInstrumental {
-                "instrumental music"
+                ["instrumental", "jazz", "funk groove", "cinema soundtrack"]
+                    .choose(&mut rng)
+                    .unwrap_or(&"instrumental")
             } else {
-                ["music", "vinyl", "records"].choose(&mut rng).unwrap_or(&"music")
+                ["jazz", "soul", "funk", "groove", "vinyl"]
+                    .choose(&mut rng)
+                    .unwrap_or(&"groove")
             };
             parts.push(anchor.to_string());
         }
-        if let Some(d) = decade_word {
-            parts.push(d.to_string());
+
+        let year_stamp = decade_word.map(random_era_year);
+        if let Some(y) = year_stamp {
+            parts.push(y.to_string());
         }
 
         if filters.mode == DigMode::OnlyInstrumental && type_word.is_none() && genre_word.is_some() {
             parts.push("instrumental".to_string());
         }
 
-        let tag = match filters.mode {
-            DigMode::WorldAdventure => "World Clean",
-            DigMode::OnlyInstrumental => "Instrumental",
-            _ => "Filtered Dig",
+        let query = parts.join(" ");
+        let tag = match (region_choice, year_stamp) {
+            (Some((_, lbl)), Some(y)) => format!("{lbl} {y}"),
+            (Some((_, lbl)), None) => lbl.to_string(),
+            _ => title_case_label(&query),
         };
-
         return BuiltQuery {
-            query: parts.join(" "),
-            query_tag: tag.to_string(),
+            query,
+            query_tag: tag,
         };
     }
 
-    // 3. Pure Random Mode (all filters set to "all")
+    // 3. Open Crate Mode (Region = All, Decade = All, Genre = All, Type = All -> ALL ERAS & REGIONS)
     match filters.mode {
         DigMode::WorldAdventure => {
             let fallback_style = WorldStyleEntry {
-                query: "french music 1970s".to_string(),
-                label: "World".to_string(),
+                query: "bossa nova vocal".to_string(),
+                label: "Rio Bossa".to_string(),
             };
             let entry = dict.world_styles.choose(&mut rng).unwrap_or(&fallback_style);
-            BuiltQuery {
-                query: entry.query.clone(),
-                query_tag: entry.label.clone(),
+            let has_digit = entry.query.chars().any(|c| c.is_ascii_digit());
+            if has_digit {
+                BuiltQuery {
+                    query: entry.query.clone(),
+                    query_tag: entry.label.clone(),
+                }
+            } else if rand::random::<f32>() < 0.70 {
+                // Stamp a random year across ALL eras (1955..2025)
+                let year = random_era_year("all");
+                BuiltQuery {
+                    query: format!("{} {}", entry.query, year),
+                    query_tag: format!("{} {}", entry.label, year),
+                }
+            } else {
+                // 30% timeless query without year so modern/classic standouts surface too
+                BuiltQuery {
+                    query: entry.query.clone(),
+                    query_tag: entry.label.clone(),
+                }
             }
         }
         DigMode::OnlyInstrumental => {
@@ -385,10 +615,20 @@ pub fn build_search_query(filters: &SearchFilters, dict: &QueryDictionary) -> Bu
                 .general_queries
                 .choose(&mut rng)
                 .cloned()
-                .unwrap_or_else(|| "library music".to_string());
+                .unwrap_or_else(|| "jazz funk".to_string());
+            let suffix = dict
+                .instrumental_suffixes
+                .choose(&mut rng)
+                .cloned()
+                .unwrap_or_else(|| "instrumental".to_string());
+            let q = if base.to_lowercase().contains("instrumental") {
+                base.clone()
+            } else {
+                format!("{base} {suffix}")
+            };
             BuiltQuery {
-                query: format!("{base} instrumental"),
-                query_tag: "Instrumental".to_string(),
+                query_tag: title_case_label(&base),
+                query: q,
             }
         }
         _ => {
@@ -398,26 +638,47 @@ pub fn build_search_query(filters: &SearchFilters, dict: &QueryDictionary) -> Bu
                 .cloned()
                 .unwrap_or_else(|| "rare groove".to_string());
 
-            if rand::random::<f32>() < 0.3 {
+            if rand::random::<f32>() < 0.25 {
                 let modifier = dict
                     .crate_modifiers
                     .choose(&mut rng)
                     .cloned()
-                    .unwrap_or_else(|| "vinyl".to_string());
+                    .unwrap_or_else(|| "groove".to_string());
                 BuiltQuery {
                     query: format!("{base} {modifier}"),
-                    query_tag: "Deep Crate".to_string(),
+                    query_tag: title_case_label(&base),
                 }
             } else {
                 BuiltQuery {
+                    query_tag: title_case_label(&base),
                     query: base,
-                    query_tag: "Crate Dig".to_string(),
                 }
             }
         }
     }
 }
 
+/// Generates a search query avoiding repeats from recent rolls and back-to-back tags.
+pub fn build_search_query_avoiding(
+    filters: &SearchFilters,
+    dict: &QueryDictionary,
+    recent_queries: &VecDeque<String>,
+    last_tag: Option<&str>,
+) -> BuiltQuery {
+    let mut best = build_search_query(filters, dict);
+    for _ in 0..12 {
+        let candidate = build_search_query(filters, dict);
+        let repeated_q = recent_queries.iter().any(|q| q == &candidate.query);
+        let repeated_tag = last_tag.map(|t| t == candidate.query_tag).unwrap_or(false);
+        if !repeated_q && !repeated_tag {
+            return candidate;
+        }
+        if !repeated_q {
+            best = candidate;
+        }
+    }
+    best
+}
 
 #[tauri::command]
 pub fn get_query_dictionary(app: AppHandle) -> QueryDictionary {
@@ -438,4 +699,3 @@ pub fn save_query_dictionary(app: AppHandle, dict: QueryDictionary) -> Result<()
     fs::write(&path, json).map_err(|e| format!("Failed to write queries.json: {e}"))?;
     Ok(())
 }
-

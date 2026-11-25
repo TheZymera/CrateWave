@@ -2,11 +2,12 @@ pub mod downloader;
 pub mod processor;
 
 use crate::discovery::{DigMode, SampleCandidate};
+use crate::logger::SessionLogger;
 use crate::storage::{build_sample_output_path, resolve_samples_dir};
 use serde::{Deserialize, Serialize};
 use std::io::SeekFrom;
 use std::path::PathBuf;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -123,7 +124,6 @@ async fn handle_audio_http_client(mut stream: TcpStream) {
         "audio/wav"
     };
 
-    // Parse optional HTTP Range: bytes=start-end
     let range_header = req_str.lines().find_map(|line| {
         let (k, v) = line.split_once(':')?;
         if k.trim().eq_ignore_ascii_case("range") {
@@ -258,14 +258,80 @@ pub async fn load_and_chop_sample(
     candidate: SampleCandidate,
     mode: DigMode,
     format: ExportFormat,
+    logger: State<'_, SessionLogger>,
 ) -> Result<ActiveSample, String> {
-    let mut sample = downloader::download_and_prepare_sample(&app, &candidate, &mode, &format).await?;
-    let port = ensure_audio_server().await?;
+    logger.write_line(
+        "INFO",
+        "RUST",
+        "TASK:CHOP",
+        "Downloading & preparing sample",
+        Some(&format!(
+            "id={} source={} mode={:?} fmt={:?}",
+            candidate.id, candidate.source, mode, format
+        )),
+    );
+
+    let mut sample =
+        match downloader::download_and_prepare_sample(&app, &candidate, &mode, &format).await {
+            Ok(s) => s,
+            Err(e) => {
+                let lower_e = e.to_lowercase();
+                let is_permanent_media_err = lower_e.contains("http 404")
+                    || lower_e.contains("http 410")
+                    || lower_e.contains("http 403")
+                    || lower_e.contains("silent")
+                    || lower_e.contains("too short")
+                    || lower_e.contains("invalid wav")
+                    || lower_e.contains("ffmpeg decode failed")
+                    || lower_e.contains("no downloadable audio");
+
+                if is_permanent_media_err {
+                    let _ = crate::storage::quarantine_id(&app, &candidate.id);
+                    logger.write_line(
+                        "WARN",
+                        "RUST",
+                        "QUARANTINE",
+                        "Blacklisted unplayable/silent candidate",
+                        Some(&format!(
+                            "id={} source={} err={}",
+                            candidate.id, candidate.source, e
+                        )),
+                    );
+                } else {
+                    logger.write_line(
+                        "WARN",
+                        "RUST",
+                        "CHOP_TRANSIENT_ERR",
+                        &e,
+                        Some(&candidate.id),
+                    );
+                }
+                return Err(e);
+            }
+        };
+
+    let port = match ensure_audio_server().await {
+        Ok(p) => p,
+        Err(e) => {
+            logger.write_line("ERROR", "RUST", "AUDIO_SRV_ERR", &e, None);
+            return Err(e);
+        }
+    };
+
     sample.stream_url = format!(
         "http://127.0.0.1:{}/stream?path={}",
         port,
         url_encode_path(&sample.master_wav_path)
     );
+
+    logger.write_line(
+        "INFO",
+        "RUST",
+        "CHOP_OK",
+        &format!("Sample ready ({:.2}s)", sample.duration_sec),
+        Some(&format!("id={} port={}", candidate.id, port)),
+    );
+
     Ok(sample)
 }
 
@@ -277,8 +343,27 @@ pub async fn export_trimmed_sample(
     start_sec: f64,
     end_sec: f64,
     format: ExportFormat,
+    logger: State<'_, SessionLogger>,
 ) -> Result<String, String> {
-    let samples_dir = resolve_samples_dir()?;
+    logger.write_line(
+        "INFO",
+        "RUST",
+        "TASK:EXPORT",
+        "Rendering trimmed export",
+        Some(&format!(
+            "title='{}' range={:.2}s..{:.2}s fmt={:?}",
+            title, start_sec, end_sec, format
+        )),
+    );
+
+    let samples_dir = match resolve_samples_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            logger.write_line("ERROR", "RUST", "EXPORT_DIR_ERR", &e, None);
+            return Err(e);
+        }
+    };
+
     let output_path = build_sample_output_path(
         &samples_dir,
         &mode,
@@ -288,16 +373,29 @@ pub async fn export_trimmed_sample(
         &format,
     );
 
-    processor::render_trimmed_export(
+    if let Err(e) = processor::render_trimmed_export(
         &PathBuf::from(&master_wav_path),
         &output_path,
         start_sec,
         end_sec,
         &format,
     )
-    .await?;
+    .await
+    {
+        logger.write_line("ERROR", "RUST", "EXPORT_ERR", &e, Some(&title));
+        return Err(e);
+    }
 
-    Ok(output_path.to_string_lossy().to_string())
+    let out_str = output_path.to_string_lossy().to_string();
+    logger.write_line(
+        "INFO",
+        "RUST",
+        "EXPORT_OK",
+        "Exported trimmed slice",
+        Some(&out_str),
+    );
+
+    Ok(out_str)
 }
 
 #[tauri::command]
@@ -306,14 +404,46 @@ pub async fn extend_sample_audio(
     candidate: crate::discovery::SampleCandidate,
     mode: crate::discovery::DigMode,
     format: ExportFormat,
+    logger: State<'_, SessionLogger>,
 ) -> Result<ActiveSample, String> {
+    logger.write_line(
+        "INFO",
+        "RUST",
+        "TASK:EXTEND",
+        "Extending sample beyond initial capture",
+        Some(&format!("id={} source={}", candidate.id, candidate.source)),
+    );
+
     let mut sample =
-        downloader::extend_and_prepare_full_sample(&app, &candidate, &mode, &format).await?;
-    let port = ensure_audio_server().await?;
+        match downloader::extend_and_prepare_full_sample(&app, &candidate, &mode, &format).await {
+            Ok(s) => s,
+            Err(e) => {
+                logger.write_line("WARN", "RUST", "EXTEND_WARN", &e, Some(&candidate.id));
+                return Err(e);
+            }
+        };
+
+    let port = match ensure_audio_server().await {
+        Ok(p) => p,
+        Err(e) => {
+            logger.write_line("ERROR", "RUST", "AUDIO_SRV_ERR", &e, None);
+            return Err(e);
+        }
+    };
+
     sample.stream_url = format!(
         "http://127.0.0.1:{}/stream?path={}",
         port,
         url_encode_path(&sample.master_wav_path)
     );
+
+    logger.write_line(
+        "INFO",
+        "RUST",
+        "EXTEND_OK",
+        &format!("Extended sample ready ({:.2}s)", sample.duration_sec),
+        Some(&candidate.id),
+    );
+
     Ok(sample)
 }

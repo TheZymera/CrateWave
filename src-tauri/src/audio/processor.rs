@@ -1,9 +1,14 @@
 use crate::audio::ExportFormat;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use tokio::process::Command;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Strips leading digital silence (< -55 dBFS) and normalizes audition playback to -14 LUFS / -1.0 dBTP.
+const AUDIO_CONDITION_FILTER: &str =
+    "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-55dB:detection=peak,loudnorm=I=-14:TP=-1.0:LRA=11";
 
 fn resolve_sidecar_binary(base_name: &str) -> Result<PathBuf, String> {
     let exe_dir = std::env::current_exe()
@@ -61,7 +66,8 @@ pub async fn probe_duration_sec(audio_path: &Path) -> Result<f64, String> {
         "-of",
         "default=noprint_wrappers=1:nokey=1",
     ])
-    .arg(audio_path);
+    .arg(audio_path)
+    .kill_on_drop(true);
 
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -76,22 +82,34 @@ pub async fn probe_duration_sec(audio_path: &Path) -> Result<f64, String> {
         .map_err(|_| format!("Could not parse duration from ffprobe output: '{raw}'"))
 }
 
-/// Decodes any downloaded media file into a clean 44.1kHz / 16-bit stereo PCM Master WAV.
-pub async fn decode_to_master_wav(input_path: &Path, master_wav_path: &Path) -> Result<(), String> {
+/// Decodes any audio file to 44.1kHz / 16-bit stereo Master WAV with transient needle-drop & -14 LUFS.
+pub async fn decode_and_condition_wav(
+    input_path: &Path,
+    master_wav_path: &Path,
+    max_seconds: Option<u32>,
+) -> Result<(), String> {
     let ffmpeg = resolve_ffmpeg_path()?;
     let mut cmd = Command::new(&ffmpeg);
-    cmd.args(["-y", "-i"])
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+
+    // Read slightly past max_seconds so trimming leading silence still yields a full preview
+    if let Some(secs) = max_seconds {
+        cmd.args(["-t", &(secs + 15).to_string()]);
+    }
+
+    cmd.arg("-i")
         .arg(input_path)
-        .args([
-            "-vn",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "44100",
-            "-ac",
-            "2",
-        ])
-        .arg(master_wav_path);
+        .args(["-vn", "-af", AUDIO_CONDITION_FILTER]);
+
+    if let Some(secs) = max_seconds {
+        cmd.args(["-t", &secs.to_string()]);
+    }
+
+    cmd.args(["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2"])
+        .arg(master_wav_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -103,13 +121,16 @@ pub async fn decode_to_master_wav(input_path: &Path, master_wav_path: &Path) -> 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("FFmpeg decode failed: {}", stderr.lines().last().unwrap_or("unknown error")));
+        return Err(format!(
+            "FFmpeg decode failed: {}",
+            stderr.lines().last().unwrap_or("unknown error")
+        ));
     }
 
     Ok(())
 }
 
-/// Trims `[start_sec, end_sec]` from the Master WAV and exports as WAV or 320kbps CBR MP3.
+/// Trims `[start_sec, end_sec]` from the conditioned Master WAV and exports as WAV or 320kbps CBR MP3.
 pub async fn render_trimmed_export(
     master_wav_path: &Path,
     output_path: &Path,
@@ -140,7 +161,7 @@ pub async fn render_trimmed_export(
         }
     }
 
-    cmd.arg(output_path);
+    cmd.arg(output_path).kill_on_drop(true);
 
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -152,7 +173,10 @@ pub async fn render_trimmed_export(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("FFmpeg export failed: {}", stderr.lines().last().unwrap_or("unknown error")));
+        return Err(format!(
+            "FFmpeg export failed: {}",
+            stderr.lines().last().unwrap_or("unknown error")
+        ));
     }
 
     Ok(())

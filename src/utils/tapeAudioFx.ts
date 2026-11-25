@@ -19,7 +19,7 @@ export class TurntableAudioDeck {
     this.onStateChange = onStateChange;
   }
 
-  private ensureContext(): AudioContext {
+  private ensureContext(resumeIfSuspended = true): AudioContext {
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
@@ -35,7 +35,7 @@ export class TurntableAudioDeck {
       this.gainNode.connect(this.analyser);
       this.analyser.connect(this.ctx.destination);
     }
-    if (this.ctx.state === "suspended") {
+    if (resumeIfSuspended && this.ctx.state === "suspended") {
       this.ctx.resume().catch(() => {});
     }
     return this.ctx;
@@ -112,9 +112,10 @@ export class TurntableAudioDeck {
 
   private async fetchAndDecode(
     streamUrl: string | undefined,
-    masterWavPath: string
+    masterWavPath: string,
+    resumeContext: boolean
   ): Promise<AudioBuffer> {
-    const ctx = this.ensureContext();
+    const ctx = this.ensureContext(resumeContext);
     let arrayBuf: ArrayBuffer | null = null;
 
     if (streamUrl) {
@@ -141,11 +142,19 @@ export class TurntableAudioDeck {
       throw new Error("Audio buffer is empty");
     }
 
-    return await ctx.decodeAudioData(arrayBuf.slice(0));
+    return await ctx.decodeAudioData(arrayBuf);
+  }
+
+  /** Background pre-decode for the 3-slot lookahead queue (no playback, no autoplay warning) */
+  public async predecodeBuffer(
+    streamUrl: string | undefined,
+    masterWavPath: string
+  ): Promise<AudioBuffer> {
+    return this.fetchAndDecode(streamUrl, masterWavPath, false);
   }
 
   private startBufferNode(buffer: AudioBuffer, offsetSec: number, rampMs: number) {
-    const ctx = this.ensureContext();
+    const ctx = this.ensureContext(true);
     this.stopSourceImmediately();
 
     const src = ctx.createBufferSource();
@@ -184,6 +193,42 @@ export class TurntableAudioDeck {
     src.start(0, safeOffset);
   }
 
+  /** Constant-pitch (1.0x) seamless buffer swap with a 5ms click-free micro-fade */
+  private hotSwapBufferNode(buffer: AudioBuffer, offsetSec: number) {
+    const ctx = this.ensureContext(true);
+    const now = ctx.currentTime;
+    this.stopSourceImmediately();
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.setValueAtTime(1.0, now);
+    src.connect(this.gainNode!);
+
+    if (this.gainNode) {
+      this.gainNode.gain.cancelScheduledValues(now);
+      this.gainNode.gain.setValueAtTime(Math.max(0.001, this.volume * 0.25), now);
+      this.gainNode.gain.linearRampToValueAtTime(this.volume, now + 0.005);
+    }
+
+    const activeOp = this.opId;
+    src.onended = () => {
+      if (this.sourceNode === src && this.opId === activeOp) {
+        this.playing = false;
+        this.pauseOffsetSec = 0;
+        this.onStateChange(false);
+      }
+    };
+
+    const safeOffset = Math.max(0, Math.min(offsetSec, Math.max(0, buffer.duration - 0.1)));
+    this.pauseOffsetSec = safeOffset;
+    this.startCtxTime = now;
+    this.sourceNode = src;
+    this.playing = true;
+    this.onStateChange(true);
+
+    src.start(now, safeOffset);
+  }
+
   private stopSourceImmediately() {
     if (this.sourceNode) {
       try {
@@ -197,7 +242,15 @@ export class TurntableAudioDeck {
     }
   }
 
-  /** Decodes WAV into WebAudio memory and starts playback with an analog tape spin-up */
+  /** Starts an already-decoded AudioBuffer immediately (< 10ms) with analog tape spin-up */
+  public playPredecodedBuffer(buffer: AudioBuffer, rampMs = 300): void {
+    this.opId += 1;
+    this.currentBuffer = buffer;
+    this.pauseOffsetSec = 0;
+    this.startBufferNode(buffer, 0, rampMs);
+  }
+
+  /** Fallback: decodes WAV on demand and starts playback with an analog tape spin-up */
   public async loadAndTapeStart(
     streamUrl: string | undefined,
     masterWavPath: string,
@@ -206,7 +259,7 @@ export class TurntableAudioDeck {
     this.opId += 1;
     const myOp = this.opId;
 
-    const buffer = await this.fetchAndDecode(streamUrl, masterWavPath);
+    const buffer = await this.fetchAndDecode(streamUrl, masterWavPath, true);
     if (this.opId !== myOp) return;
 
     this.currentBuffer = buffer;
@@ -268,17 +321,20 @@ export class TurntableAudioDeck {
     });
   }
 
-  /** Hot-swaps an extended full-length buffer without interrupting playback */
+  /** Hot-swaps an extended full-length buffer at 1.0x pitch with zero audible dip or motor cue */
   public async swapExtendedBuffer(
     streamUrl: string | undefined,
     masterWavPath: string
   ): Promise<void> {
-    const buffer = await this.fetchAndDecode(streamUrl, masterWavPath);
+    const startOp = this.opId;
+    const buffer = await this.fetchAndDecode(streamUrl, masterWavPath, false);
+    if (this.opId !== startOp) return;
+
     const currentPos = this.getCurrentTime();
     this.currentBuffer = buffer;
     if (this.playing) {
       this.opId += 1;
-      this.startBufferNode(buffer, currentPos, 60);
+      this.hotSwapBufferNode(buffer, currentPos);
     }
   }
 

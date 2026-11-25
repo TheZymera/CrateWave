@@ -615,14 +615,19 @@ export function Turntable3DCanvas({
     leftDeckLamp.position.set(-5.4, 10.8, -5.2);
     scene.add(leftDeckLamp);
 
-    const keyLight = new THREE.SpotLight("#ffdfb3", 7.0, 38, Math.PI / 1.65, 1.0, 0.55);
+    const keyLight = new THREE.DirectionalLight("#ffdfb3", 1.75);
     keyLight.position.set(5.6, 10.6, -5.0);
-    keyLight.target.position.set(1.2, 0, 0.25);
+    keyLight.target.position.set(0.2, 0, 0.1);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(2048, 2048);
-    keyLight.shadow.bias = -0.0004;
-    keyLight.shadow.camera.near = 1;
-    keyLight.shadow.camera.far = 26;
+    keyLight.shadow.camera.left = -5.4;
+    keyLight.shadow.camera.right = 5.4;
+    keyLight.shadow.camera.top = 4.2;
+    keyLight.shadow.camera.bottom = -4.2;
+    keyLight.shadow.camera.near = 4.0;
+    keyLight.shadow.camera.far = 22.0;
+    keyLight.shadow.bias = -0.00015;
+    keyLight.shadow.normalBias = 0.018;
     scene.add(keyLight);
     scene.add(keyLight.target);
 

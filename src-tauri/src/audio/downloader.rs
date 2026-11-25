@@ -3,12 +3,12 @@ use crate::discovery::ytdlp_search::resolve_ytdlp_path;
 use crate::discovery::{DigMode, SampleCandidate};
 use crate::storage::sanitize_filename;
 use futures_util::StreamExt;
-use serde::Deserialize;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -18,6 +18,22 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const INITIAL_CAPTURE_SEC: u32 = 45;
 const INITIAL_DIRECT_MAX_BYTES: u64 = 2_400_000;
+const MAX_CACHED_WAVS: usize = 12;
+
+static STREAM_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn stream_http_client() -> &'static reqwest::Client {
+    STREAM_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .http1_only()
+            .pool_max_idle_per_host(8)
+            .connect_timeout(Duration::from_secs(6))
+            .read_timeout(Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CrateWave/2.0")
+            .build()
+            .expect("Failed to build streaming HTTP client")
+    })
+}
 
 fn emit_progress(app: &AppHandle, job_id: &str, stage: &str, percent: f32, message: &str) {
     let payload = ChopJobProgress {
@@ -36,53 +52,37 @@ fn parse_ytdlp_percent(line: &str) -> Option<f32> {
     num_str.parse::<f32>().ok()
 }
 
-#[derive(Debug, Deserialize)]
-struct IaFilesResponse {
-    result: Option<Vec<IaFileEntry>>,
-}
+/// Keeps disk usage bounded by removing oldest `*_master.wav` files beyond `MAX_CACHED_WAVS`.
+fn prune_audio_cache(cache_dir: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(cache_dir) else { return };
+    let mut wavs: Vec<(SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with("_master.wav"))
+                .unwrap_or(false)
+        })
+        .map(|p| {
+            let mtime = fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (mtime, p)
+        })
+        .collect();
 
-#[derive(Debug, Deserialize)]
-struct IaFileEntry {
-    name: String,
-    size: Option<String>,
-}
-
-/// Fast local FFmpeg decode (slices first `max_seconds` on disk in ~0.1s)
-async fn decode_local_to_wav(
-    input_path: &Path,
-    output_wav_path: &Path,
-    max_seconds: Option<u32>,
-) -> Result<(), String> {
-    let ffmpeg_path = processor::resolve_ffmpeg_path()?;
-    let mut cmd = Command::new(ffmpeg_path);
-    cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-        .arg(input_path);
-
-    if let Some(secs) = max_seconds {
-        cmd.args(["-t", &secs.to_string()]);
+    if wavs.len() <= keep {
+        return;
     }
-
-    cmd.args(["-vn", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le"])
-        .arg(output_wav_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run FFmpeg: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("FFmpeg decode failed: {err}"));
+    wavs.sort_by_key(|(t, _)| *t);
+    let to_remove = wavs.len() - keep;
+    for (_, old_path) in wavs.into_iter().take(to_remove) {
+        let _ = fs::remove_file(old_path);
     }
-    Ok(())
 }
 
-/// Downloads a direct HTTP audio stream (.mp3, .ogg, .wav, .flac) via reqwest
+/// Downloads a direct HTTP audio stream (iTunes, Deezer, Openverse, MP3/M4A/OGG/WAV)
 async fn download_direct_http_stream(
     app: &AppHandle,
     job_id: &str,
@@ -90,19 +90,13 @@ async fn download_direct_http_stream(
     dest_path: &Path,
     max_bytes: Option<u64>,
 ) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(8))
-        .read_timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CrateWave/2.0")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let resp = client
+    let req = stream_http_client()
         .get(url)
-        .header("Accept-Encoding", "identity")
-        .header("Referer", "https://ccmixter.org/")
-        .send()
+        .header("Accept-Encoding", "identity");
+
+    let resp = tokio::time::timeout(Duration::from_secs(7), req.send())
         .await
+        .map_err(|_| "Direct audio stream timed out (7s)".to_string())?
         .map_err(|e| format!("Direct audio stream error: {e}"))?;
 
     if !resp.status().is_success() {
@@ -152,83 +146,12 @@ async fn download_direct_http_stream(
     Ok(())
 }
 
-async fn download_internet_archive_direct(
-    app: &AppHandle,
-    job_id: &str,
-    source_url: &str,
-    dest_path: &Path,
-    max_bytes: Option<u64>,
-) -> Result<(), String> {
-    let identifier = source_url
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .ok_or_else(|| "Invalid Internet Archive URL".to_string())?;
-
-    let client = reqwest::Client::builder()
-        .http1_only()
-        .connect_timeout(Duration::from_secs(8))
-        .read_timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CrateWave/2.0")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    emit_progress(app, job_id, "downloading", 8.0, "Fetching Archive tracklist...");
-
-    let meta_url = format!("https://archive.org/metadata/{}/files", identifier);
-    let meta: IaFilesResponse = client
-        .get(&meta_url)
-        .header("Accept-Encoding", "identity")
-        .send()
-        .await
-        .map_err(|e| format!("Archive metadata error: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Archive metadata parse error: {e}"))?;
-
-    let files = meta.result.unwrap_or_default();
-
-    // Prioritize frame-streamable formats (.mp3, .ogg, .wav) that decode cleanly when byte-capped
-    let priority_exts = [".mp3", ".ogg", ".wav", ".flac", ".m4a"];
-    let mut best_file: Option<(&IaFileEntry, usize)> = None;
-
-    for f in &files {
-        let lower = f.name.to_lowercase();
-        if lower.ends_with("_spectrogram.png") || lower.contains(".thumbs/") {
-            continue;
-        }
-        let size_bytes: u64 = f
-            .size
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1_000_000);
-        if size_bytes < 20_000 || size_bytes > 160_000_000 {
-            continue;
-        }
-
-        if let Some(rank) = priority_exts.iter().position(|ext| lower.ends_with(ext)) {
-            match best_file {
-                None => best_file = Some((f, rank)),
-                Some((_, best_rank)) if rank < best_rank => best_file = Some((f, rank)),
-                _ => {}
-            }
-        }
-    }
-
-    let (chosen, rank) = best_file
-        .ok_or_else(|| "No downloadable audio file found in this Internet Archive item".to_string())?;
-
-    let encoded_name = chosen.name.replace(' ', "%20");
-    let direct_url = format!("https://archive.org/download/{}/{}", identifier, encoded_name);
-
-    // Only byte-cap streamable formats (.mp3/.ogg); .m4a needs its trailing moov atom
-    let effective_cap = if rank <= 1 { max_bytes } else { None };
-    download_direct_http_stream(app, job_id, &direct_url, dest_path, effective_cap).await
-}
-
 fn is_direct_audio_url(url: &str) -> bool {
     let clean = url.split('?').next().unwrap_or(url).to_lowercase();
-    clean.ends_with(".mp3") || clean.ends_with(".ogg") || clean.ends_with(".wav")
+    clean.ends_with(".mp3")
+        || clean.ends_with(".m4a")
+        || clean.ends_with(".ogg")
+        || clean.ends_with(".wav")
 }
 
 pub async fn download_and_prepare_sample_with_limit(
@@ -248,30 +171,40 @@ pub async fn download_and_prepare_sample_with_limit(
     fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Failed to create cache dir: {e}"))?;
 
+    prune_audio_cache(&cache_dir, MAX_CACHED_WAVS);
+
     let master_wav_path = cache_dir.join(format!("{}_master.wav", job_id));
     let _ = fs::remove_file(&master_wav_path);
 
-    if candidate.source == "internet_archive" {
+    if matches!(candidate.source.as_str(), "itunes" | "deezer") {
+        // 30s studio CDN previews (~480KB): download complete file so M4A moov atom stays intact
+        let ext = if candidate.source == "itunes" { "m4a" } else { "mp3" };
+        let direct_raw = cache_dir.join(format!("{}_raw.{ext}", job_id));
+        let _ = fs::remove_file(&direct_raw);
+
+        download_direct_http_stream(app, &job_id, &candidate.source_url, &direct_raw, None).await?;
+
+        emit_progress(app, &job_id, "decoding", 78.0, "Conditioning Master WAV...");
+        let decode_res =
+            processor::decode_and_condition_wav(&direct_raw, &master_wav_path, max_seconds).await;
+        let _ = fs::remove_file(&direct_raw);
+        decode_res?;
+    } else if candidate.source == "openverse" || is_direct_audio_url(&candidate.source_url) {
         let direct_raw = cache_dir.join(format!("{}_raw.audio", job_id));
         let _ = fs::remove_file(&direct_raw);
-        let max_bytes = max_seconds.map(|_| INITIAL_DIRECT_MAX_BYTES);
 
-        download_internet_archive_direct(
-            app,
-            &job_id,
-            &candidate.source_url,
-            &direct_raw,
-            max_bytes,
-        )
-        .await?;
-
-        emit_progress(app, &job_id, "decoding", 78.0, "Decoding Master WAV...");
-        decode_local_to_wav(&direct_raw, &master_wav_path, max_seconds).await?;
-        let _ = fs::remove_file(&direct_raw);
-    } else if candidate.source == "ccmixter" || is_direct_audio_url(&candidate.source_url) {
-        let direct_raw = cache_dir.join(format!("{}_raw.audio", job_id));
-        let _ = fs::remove_file(&direct_raw);
-        let max_bytes = max_seconds.map(|_| INITIAL_DIRECT_MAX_BYTES);
+        let clean_url = candidate
+            .source_url
+            .split('?')
+            .next()
+            .unwrap_or(&candidate.source_url)
+            .to_lowercase();
+        let can_byte_cap = clean_url.ends_with(".mp3") || clean_url.ends_with(".ogg");
+        let max_bytes = if can_byte_cap {
+            max_seconds.map(|_| INITIAL_DIRECT_MAX_BYTES)
+        } else {
+            None
+        };
 
         download_direct_http_stream(
             app,
@@ -282,10 +215,13 @@ pub async fn download_and_prepare_sample_with_limit(
         )
         .await?;
 
-        emit_progress(app, &job_id, "decoding", 78.0, "Decoding Master WAV...");
-        decode_local_to_wav(&direct_raw, &master_wav_path, max_seconds).await?;
+        emit_progress(app, &job_id, "decoding", 78.0, "Conditioning Master WAV...");
+        let decode_res =
+            processor::decode_and_condition_wav(&direct_raw, &master_wav_path, max_seconds).await;
         let _ = fs::remove_file(&direct_raw);
+        decode_res?;
     } else {
+        // YouTube via yt-dlp with fast partial capture (*0-48s) so it never downloads full 20-min audio
         let ytdlp_path = resolve_ytdlp_path(app)?;
         let ffmpeg_path = processor::resolve_ffmpeg_path()?;
         let raw_template = cache_dir.join(format!("{}_raw.%(ext)s", job_id));
@@ -293,9 +229,11 @@ pub async fn download_and_prepare_sample_with_limit(
         let mut cmd = Command::new(&ytdlp_path);
         cmd.args([
             "-f",
-            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "bestaudio[filesize<10M]/bestaudio[abr<=160]/bestaudio[ext=m4a]/bestaudio",
             "--no-playlist",
             "--no-part",
+            "--socket-timeout",
+            "5",
             "--concurrent-fragments",
             "4",
             "--newline",
@@ -303,12 +241,20 @@ pub async fn download_and_prepare_sample_with_limit(
             "--no-warnings",
             "--ffmpeg-location",
         ])
-        .arg(ffmpeg_path.parent().unwrap_or(ffmpeg_path.as_ref()))
-        .arg("-o")
-        .arg(&raw_template)
-        .arg(&candidate.source_url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg(ffmpeg_path.parent().unwrap_or(ffmpeg_path.as_ref()));
+
+        if candidate.source == "youtube" {
+            if let Some(secs) = max_seconds {
+                cmd.args(["--download-sections", &format!("*0-{}", secs + 6)]);
+            }
+        }
+
+        cmd.arg("-o")
+            .arg(&raw_template)
+            .arg(&candidate.source_url)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -333,9 +279,9 @@ pub async fn download_and_prepare_sample_with_limit(
             }
         }
 
-        let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        let output = tokio::time::timeout(Duration::from_secs(14), child.wait_with_output())
             .await
-            .map_err(|_| "Track download timed out".to_string())?
+            .map_err(|_| "YouTube download timed out (14s)".to_string())?
             .map_err(|e| format!("yt-dlp process error: {e}"))?;
 
         if !output.status.success() {
@@ -360,8 +306,10 @@ pub async fn download_and_prepare_sample_with_limit(
             })
             .ok_or_else(|| "Downloaded audio file not found in cache".to_string())?;
 
-        emit_progress(app, &job_id, "decoding", 80.0, "Decoding Master WAV...");
-        let decode_res = decode_local_to_wav(&downloaded_file, &master_wav_path, max_seconds).await;
+        emit_progress(app, &job_id, "decoding", 80.0, "Conditioning Master WAV...");
+        let decode_res =
+            processor::decode_and_condition_wav(&downloaded_file, &master_wav_path, max_seconds)
+                .await;
         let _ = fs::remove_file(&downloaded_file);
         decode_res?;
     }
@@ -369,15 +317,20 @@ pub async fn download_and_prepare_sample_with_limit(
     let wav_bytes = fs::metadata(&master_wav_path)
         .map(|m| m.len())
         .unwrap_or(0);
-    if wav_bytes <= 44_100 {
+    if wav_bytes <= 176_400 {
         let _ = fs::remove_file(&master_wav_path);
-        return Err("Decoded WAV is empty or too short".to_string());
+        return Err("Decoded WAV is silent, empty, or too short".to_string());
     }
 
     emit_progress(app, &job_id, "decoding", 92.0, "Probing waveform duration...");
     let duration_sec = processor::probe_duration_sec(&master_wav_path)
         .await
         .map_err(|e| format!("Invalid WAV file: {e}"))?;
+
+    if duration_sec < 1.5 {
+        let _ = fs::remove_file(&master_wav_path);
+        return Err(format!("Track too short after silence trim ({duration_sec:.2}s)"));
+    }
 
     let initial_trim_end = duration_sec.min(16.0);
     let master_str = master_wav_path.to_string_lossy().to_string();
